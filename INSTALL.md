@@ -32,7 +32,7 @@
 
 ![BWM Install Instruction 8](./resources/install_instruction/8.jpg)
 
-9. Press the PM5 power button. The indicator light should turn on to confirm that the device has powered on. If it does not light up, try briefly charging the PM5 through the Type-C port to wake the battery.
+9. Press the PM5 power button. The indicator light should turn on to confirm that the device has powered on. If it does not light up, try briefly charging the PM5 through the left side Type-C port to wake the battery. Press the orange button for approx five seconds to power on. The blue LED should light up. Press for another five seconds to power off.
 
 10. After confirming that the device is operating normally, reinstall the two plastic covers that were removed earlier.
 
