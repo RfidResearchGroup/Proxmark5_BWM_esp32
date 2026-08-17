@@ -12,11 +12,11 @@
 
 ![BWM Install Instruction 3](./resources/install_instruction/3.jpg)
 
-4. Install the small circuit board from the kit into the reserved slot on the PM5 host. Apply steady vertical pressure to avoid damaging the connector. Once the board is fully seated and locked by the two clips, the installation is complete.
+4. Install the small circuit board from the kit into the reserved slot on the PM5 host. There may be a tiny plastic slot protector installed across the host connector pins which you need to first remove by easing it out gently. Then align the BWM sub board by putting the angled edge under the top left diagonal plastic clip and rotating the board so that it's square to the plastic edges. If you try just clicking the BWM board into place without doing this step it can be twisted slightly out of square by the clips and not you will damage the pins if you try forcing the connector in. If it's straight then you should feel the connector notch into place. Press the connector into place by applying steady vertical pressure to avoid damaging it. Once the board is fully seated and locked by the two clips, the installation is complete.
 
 ![BWM Install Instruction 4](./resources/install_instruction/4.jpg)
 
-5. Remove the protective backing paper from the double-sided adhesive on the back of the lithium battery.
+5. Your battery may have been shippied inside a plastic case which doesn't seem to connect anywhere on the PM5. If so, open the shipping case and inside will be the PM5 abttery. Remove the protective backing paper from the double-sided adhesive on the back of the lithium battery.
 
 ![BWM Install Instruction 5](./resources/install_instruction/5.jpg)
 
