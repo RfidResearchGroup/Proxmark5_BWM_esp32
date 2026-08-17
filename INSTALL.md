@@ -16,7 +16,7 @@
 
 ![BWM Install Instruction 4](./resources/install_instruction/4.jpg)
 
-5. Your battery may have been shippied inside a plastic case which doesn't seem to connect anywhere on the PM5. If so, open the shipping case and inside will be the PM5 abttery. Remove the protective backing paper from the double-sided adhesive on the back of the lithium battery.
+5. Your battery may have been shippied inside a plastic case which doesn't seem to connect anywhere on the PM5. If so, open the shipping case and inside will be the PM5 battery. Remove the protective backing paper from the double-sided adhesive on the back of the lithium battery.
 
 ![BWM Install Instruction 5](./resources/install_instruction/5.jpg)
 
