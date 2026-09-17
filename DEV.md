@@ -633,7 +633,7 @@ Passthrough uses a **bidirectional multi-channel** model:
 2. `tx_data_forward_from_uart()` sends the data to both:
     - **BLE** (always attempted)
     - **WiFi** (only when `wifi_function_mode == WIFI_FORWARD`)
-3. As long as either BLE or WiFi succeeds, the operation is considered successful.
+3. The `TYPE_SLAVE_RESP` for 5000 is sent before step 2, when the frame leaves the UART ring (flow-control credit for the host). A frame no channel accepts is logged and dropped.
 
 #### Wireless -> UART (Downlink)
 
@@ -646,7 +646,7 @@ Passthrough uses a **bidirectional multi-channel** model:
 
 ```
 Host ──► APP_CMD_SEND_FORWARD_DATA (5000) + Payload ──► Module
-Module ──► TYPE_SLAVE_RESP (5000) ──► Host (success acknowledgement)
+Module ──► TYPE_SLAVE_RESP (5000) ──► Host (frame taken out of the UART ring; sent before forwarding)
 ```
 
 > **Important**: `APP_CMD_SEND_FORWARD_DATA` does not specify a target. The data is sent to **all currently active passthrough channels**. To disable or isolate a channel, control it through WiFi mode or BLE start/stop commands.
@@ -1333,7 +1333,7 @@ Persisted in NVS (`app_wifi/wifi_ps`). Applied at once when WiFi is running, and
 | Send | Payload = data to send (any length <= `MAX_PAYLOAD_LEN`) |
 | Response | (empty payload) |
 
-The data is sent to both BLE and WiFi if WiFi Forward mode is active. Success is returned as long as either path succeeds.
+The response is sent as soon as the frame has been parsed out of the UART ring, before the data goes out over BLE/WiFi: it is a flow-control credit for the host, not a delivery receipt. The data is then sent to BLE and, if WiFi Forward mode is active, to WiFi; a frame no channel accepts is logged and dropped (no `CMD_ERROR`).
 
 > **Source**: `main/main.c:1551-1560`
 

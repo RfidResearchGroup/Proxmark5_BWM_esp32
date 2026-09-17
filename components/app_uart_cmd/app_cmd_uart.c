@@ -359,32 +359,19 @@ static void uart_rx_task(void *pvParameters) {
             switch (event.type) {
                 case UART_DATA: {
                     link_touch();
-                    // First check current buffer data length, if exceeds threshold use heap memory, else use stack memory to reduce fragmentation risk
-                    int length_in_buffer = 0;
-                    uart_get_buffered_data_len(UART_SPP_NUM, (size_t*)&length_in_buffer);
-                    bool use_heap = (length_in_buffer > 256);
-                    uint8_t *rbuf = NULL; // Optimization: small data uses stack, large data uses heap, reduce fragmentation
-                    uint8_t buffer_stack[256]; // Allocate max 256 bytes on stack, sufficient for most small packets
-                    if (use_heap) {
-                        rbuf = (uint8_t *)malloc(length_in_buffer);
-                        if (!rbuf) {
-                            ESP_LOGE(TAG, "Malloc failed for UART of CMD data, length: %d", length_in_buffer);
+                    // Drain the driver's ring in UART_RX_CHUNK pieces. The chunk bounds
+                    // memory (this task is the only reader, so one static buffer); the
+                    // loop matters because the driver queues UART_DATA on arrival only,
+                    // so bytes left behind by a partial read would wait for the next burst.
+                    static uint8_t rbuf[UART_RX_CHUNK];
+                    size_t buffered = 0;
+                    while ((uart_get_buffered_data_len(UART_SPP_NUM, &buffered) == ESP_OK) && (buffered > 0)) {
+                        size_t want = (buffered < sizeof(rbuf)) ? buffered : sizeof(rbuf);
+                        int read_len = uart_read_bytes(UART_SPP_NUM, rbuf, want, 0);   // already buffered: no wait
+                        if (read_len <= 0) {
                             break;
                         }
-                    } else {
-                        rbuf = buffer_stack;
-                    }
-                    // Read available bytes from UART RX buffer
-                    int read_len = uart_read_bytes(UART_SPP_NUM, rbuf, length_in_buffer, pdMS_TO_TICKS(UART_RX_TIMEOUT));
-                    // ESP_LOGI(TAG, "UART Event: Data received, length = %d", read_len);
-                    // ESP_LOG_BUFFER_HEX(TAG, rbuf, read_len); // This print may trigger watchdog as data can be large
-                    // Parse received payload when data is present
-                    if (read_len > 0) {
                         uart_rx_parser(rbuf, read_len);
-                    }
-                    // Release temporary heap buffer if used
-                    if (use_heap && rbuf) {
-                        free(rbuf);
                     }
                     // If last buffer byte is used by user data, may have stack overflow, very serious error
                     if (s_ctx.payload_buf[MAX_PAYLOAD_LEN] != 0x00) {

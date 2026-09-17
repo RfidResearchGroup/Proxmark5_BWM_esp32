@@ -11,7 +11,14 @@
 #define UART_RXD_PIN           (CONFIG_UART_SPP_RXP)
 #define UART_BAUD_RATE_DEFAULT 460800   // Default communication baud rate, max supported depends on CONFIG_SOC_UART_BITRATE_MAX
 #define UART_RX_TIMEOUT        200      // Receive timeout in milliseconds, needs tuning; too short may falsely timeout normal packets, too long may waste resources on incomplete packets
-#define UART_RX_BUF_SIZE       4096     // Absorb device->host bursts so BLE can drain them before the UART overflows
+// The PM5 bounds its un-acked bytes in flight to this size minus slack
+// (BWM_ESP_UART_RX_BUF / BWM_FC_BYTES in proxmark3 armsrc/bwm_forward.h) but sends
+// on when acks stall past its 50 ms timeout, so only a radio stall longer than
+// that on a full window can overflow the ring. Change one, change the other.
+#define UART_RX_BUF_SIZE       12288    // Absorb device->host bursts so BLE can drain them before the UART overflows
+// The rx task reads the ring in pieces of this size into a static buffer; a heap
+// allocation sized by whatever is buffered can fail on the heap BLE leaves free.
+#define UART_RX_CHUNK          2048
 #define UART_TX_BUF_SIZE       0        // Important: with TX BUF=0, uart_write_bytes call blocks waiting
 #define UART_EVENT_QUEUE_SZ    10       // UART event queue length, tune based on use; too small may lose events, too large wastes memory
 

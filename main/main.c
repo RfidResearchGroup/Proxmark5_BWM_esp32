@@ -1654,13 +1654,16 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         }
 
         case APP_CMD_SEND_FORWARD_DATA: {
-            // No need to validate data length; a zero-length packet may be valid
+            // No need to validate data length; a zero-length packet may be valid.
+            // Ack first: the ack tells the host the frame has left the UART ring,
+            // which is what its byte-window flow control budgets. Acking after the
+            // radio would add the whole radio pipeline to the host's window and
+            // throttle it to ~85 % of the UART rate; a delivery failure is logged.
+            app_uart_send_response(cmd, NULL, 0);
             esp_err_t err = tx_data_forward_from_uart(p_data, length);
             if (err != ESP_OK) {
-                uart_cmd_error_report(cmd, err);
-                break;
+                ESP_LOGW(TAG, "forward data (%u B) not delivered: %s", (unsigned)length, esp_err_to_name(err));
             }
-            app_uart_send_response(cmd, NULL, 0);
             break;
         }
 
