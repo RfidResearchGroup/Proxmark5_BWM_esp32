@@ -959,6 +959,26 @@ Applies at once (no reboot) and is persisted in NVS (`app_sys/pwr_save`). See se
 
 > **Source**: `main/main.c`
 
+#### 1021 - APP_CMD_SET_SYS_HOST_VALUE - Store a Host Setting
+
+| Direction | Format |
+|------|------|
+| Send | Payload = `uint8_t` id + `uint32_t` value (LE) |
+| Response | Payload = `uint32_t` stored value |
+
+A setting of the host (PM5) that has no storage of its own. The module keeps it in NVS (`app_host/h<id>`, a u64 holding the value plus a set flag, so a never-stored slot reads as absent rather than 0) and hands it back; it does not interpret it. The ids are the host's: the PM5 uses 0 for its auto power-off switch, 1 for the idle seconds, and 2 for the unplug switch.
+
+> **Source**: `main/main.c`, `main/main_settings.c`
+
+#### 1022 - APP_CMD_GET_SYS_HOST_VALUE - Read a Host Setting
+
+| Direction | Format |
+|------|------|
+| Send | Payload = `uint8_t` id |
+| Response | Payload = `uint8_t` present (0 = never stored) + `uint32_t` value (LE) |
+
+> **Source**: `main/main.c`
+
 ### 9.3 OTA and Reboot Commands (1800~)
 
 #### 1800 - APP_CMD_OTA_BEGIN - Start OTA
@@ -1903,7 +1923,7 @@ Send: APP_CMD_SET_TO_WIFI_FORWARD_MODE (2001) + 0x04 (MQTT Client)
 
 | Range | Category | Command Count |
 |--------|------|--------|
-| 1000~1018 | System and general | 19 |
+| 1000~1022 | System and general | 23 |
 | 1800~1803 | OTA and reboot | 4 |
 | 2000~2053 | WiFi mode/configuration/connection | 54 |
 | 2200~2214 | TCP Server | 15 |
@@ -1913,7 +1933,7 @@ Send: APP_CMD_SET_TO_WIFI_FORWARD_MODE (2001) + 0x04 (MQTT Client)
 | 2600~2655 | MQTT Client | 56 |
 | 4000~4024 | BLE | 25 |
 | 5000 | Passthrough | 1 |
-| **Total** | | **211** |
+| **Total** | | **219** |
 
 ## Appendix B: Broadcast Type Quick Reference
 

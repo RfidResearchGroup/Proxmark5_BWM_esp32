@@ -698,6 +698,42 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
             break;
         }
 
+        case APP_CMD_SET_SYS_HOST_VALUE: {
+            if (length != 5) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            uint32_t value;
+            memcpy(&value, &p_data[1], sizeof(value));
+            esp_err_t err = settings_host_value_save(p_data[0], value);
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
+            app_uart_send_response(cmd, (uint8_t *)&value, sizeof(value));
+            break;
+        }
+
+        case APP_CMD_GET_SYS_HOST_VALUE: {
+            if (length != 1) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            uint32_t value = 0;
+            bool present = false;
+            esp_err_t err = settings_host_value_load(p_data[0], &value, &present);
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
+            struct __attribute__((packed)) {
+                uint8_t present;
+                uint32_t value;
+            } resp = { present ? 1 : 0, value };
+            app_uart_send_response(cmd, (uint8_t *)&resp, sizeof(resp));
+            break;
+        }
+
         case APP_CMD_REBOOT: {
             ESP_LOGW(TAG, "Host requested reboot.");
             // Acknowledge before rebooting so the host knows a reboot is coming, not a timeout

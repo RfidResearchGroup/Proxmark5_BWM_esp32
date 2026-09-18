@@ -12,6 +12,9 @@ esp_err_t settings_power_save_load(uint8_t *enabled, uint8_t default_enabled);
 esp_err_t settings_ble_enable_save(uint8_t enabled);
 esp_err_t settings_ble_enable_load(uint8_t *enabled, uint8_t default_enabled);
 
+esp_err_t settings_host_value_save(uint8_t id, uint32_t value);
+esp_err_t settings_host_value_load(uint8_t id, uint32_t *value, bool *present);
+
 esp_err_t settings_wifi_mode_save(int mode);
 esp_err_t settings_wifi_mode_load(int *mode, int default_mode);
 

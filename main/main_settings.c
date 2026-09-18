@@ -10,6 +10,7 @@
 // Namespaces
 #define NAMESPACE_SYS               "app_sys"
 #define NAMESPACE_WIFI              "app_wifi"
+#define NAMESPACE_HOST              "app_host"   // settings the host (PM5) keeps here, opaque to the module
 
 // Key names
 #define KEY_TIME_ZONE               "timezone"
@@ -121,6 +122,51 @@ esp_err_t settings_ble_enable_load(uint8_t *enabled, uint8_t default_enabled) {
         .default_value = default_enabled,
     };
     return app_nvs_rw_read(NAMESPACE_SYS, &nvs_item, 1);
+}
+
+// Host values are stored as a u64: the value in the low 32 bits and a "set"
+// flag in bit 32. app_nvs_rw_read() reports a missing numeric key as a normal
+// read of the default, so without the flag "never stored" and a stored 0 look
+// the same, and the host would load 0 over its own defaults.
+#define HOST_VALUE_SET_FLAG         (1ULL << 32)
+
+/**
+ * @brief Persist a host (PM5) setting the module does not interpret.
+ * @param id Slot 0-255, chosen by the host
+ * @param value Value to store
+ * @return esp_err_t
+ */
+esp_err_t settings_host_value_save(uint8_t id, uint32_t value) {
+    char key[8];
+    snprintf(key, sizeof(key), "h%u", (unsigned)id);
+    uint64_t raw = HOST_VALUE_SET_FLAG | value;
+    return app_nvs_rw_write(NAMESPACE_HOST, (app_nvs_rw_write_item_t[]) {
+        {
+            .key = key,
+            .type = APP_NVS_RW_TYPE_U64,
+            .data = &raw,
+            .length = sizeof(raw),
+        }
+    }, 1);
+}
+
+/**
+ * @brief Load a host setting. *present is false (and *value 0) if it was never stored.
+ */
+esp_err_t settings_host_value_load(uint8_t id, uint32_t *value, bool *present) {
+    char key[8];
+    snprintf(key, sizeof(key), "h%u", (unsigned)id);
+    uint64_t raw = 0;
+    app_nvs_rw_read_item_t nvs_item = {
+        .key = key,
+        .type = APP_NVS_RW_TYPE_U64,
+        .data = &raw,
+        .default_value = 0,
+    };
+    esp_err_t err = app_nvs_rw_read(NAMESPACE_HOST, &nvs_item, 1);
+    *present = (err == ESP_OK) && ((raw & HOST_VALUE_SET_FLAG) != 0);
+    *value = *present ? (uint32_t)raw : 0;
+    return err;
 }
 
 /**
