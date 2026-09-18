@@ -14,6 +14,7 @@
 // Key names
 #define KEY_TIME_ZONE               "timezone"
 #define KEY_POWER_SAVE              "pwr_save"
+#define KEY_BLE_ENABLE              "ble_en"
 #define KEY_WIFI_MODE               "wifi_mode"
 #define KEY_WIFI_FWD_TYPE           "wifi_fwd_type"
 #define KEY_WIFI_TX_PWR             "wifi_tx_pwr"
@@ -83,6 +84,38 @@ esp_err_t settings_power_save_save(uint8_t enabled) {
 esp_err_t settings_power_save_load(uint8_t *enabled, uint8_t default_enabled) {
     app_nvs_rw_read_item_t nvs_item = {
         .key = KEY_POWER_SAVE,
+        .type = APP_NVS_RW_TYPE_U8,
+        .data = enabled,
+        .default_value = default_enabled,
+    };
+    return app_nvs_rw_read(NAMESPACE_SYS, &nvs_item, 1);
+}
+
+/**
+ * @brief Save the BLE switch (start the BLE SPP stack at boot or not) to NVS.
+ * @param enabled 0 = off, 1 = on
+ * @return esp_err_t
+ */
+esp_err_t settings_ble_enable_save(uint8_t enabled) {
+    return app_nvs_rw_write(NAMESPACE_SYS, (app_nvs_rw_write_item_t[]) {
+        {
+            .key = KEY_BLE_ENABLE,
+            .type = APP_NVS_RW_TYPE_U8,
+            .data = &enabled,
+            .length = sizeof(enabled),
+        }
+    }, 1);
+}
+
+/**
+ * @brief Load the BLE switch from NVS.
+ * @param enabled Pointer to uint8_t where the loaded value will be stored
+ * @param default_enabled Default value to use if no value is stored in NVS
+ * @return esp_err_t
+ */
+esp_err_t settings_ble_enable_load(uint8_t *enabled, uint8_t default_enabled) {
+    app_nvs_rw_read_item_t nvs_item = {
+        .key = KEY_BLE_ENABLE,
         .type = APP_NVS_RW_TYPE_U8,
         .data = enabled,
         .default_value = default_enabled,

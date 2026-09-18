@@ -92,7 +92,8 @@ app_main()
    ├── app_log_uart_set_tx_callback()   // Register log forwarding callback
    ├── app_ble_init()                   // Initialize BLE module
    ├── app_ble_set_rx_callback()        // Register BLE receive callback
-   ├── app_ble_start()                  // Start BLE and begin advertising
+   ├── [If the persisted BLE switch is on]
+   │   └── app_ble_start()              // Start BLE and begin advertising
    ├── [If configured for WIFI_FORWARD mode]
    │   ├── wifi_forward_common_init()   // Initialize WiFi forwarding
    │   ├── Apply DHCP/static IP/hostname/MAC configuration
@@ -664,6 +665,8 @@ When the host receives this broadcast, it means data from a wireless peer has ar
 - **Always running**: BLE is initialized and started in `app_main()`.
 - **Send condition**: BLE must be connected and notifications must be enabled.
 - **Stop**: Can be stopped with `APP_CMD_STOP_BLE_SPP` and restarted with `APP_CMD_START_BLE_SPP`.
+- **Switch**: `APP_CMD_SET_BLE_ENABLE` (4023) is the persisted on/off; with it off the stack is not started at boot. The start/stop pair above is transient (used around OTA) and does not touch the setting: with the switch off, `APP_CMD_START_BLE_SPP` (4021) is acknowledged but does nothing, since hosts send it unconditionally after an OTA.
+- **Security**: with bonding off (the default) any central in range can connect and use the SPP characteristic. With bonding on (`APP_CMD_SET_BLE_BONDING_ENABLE`, persisted) pairing is LE Secure Connections with MITM and the static 6-digit passkey (`APP_CMD_SET_BLE_BONDING_KEY`, default 123456), and the SPP characteristic requires an encrypted link, so an unpaired central can connect but cannot read, write or subscribe. Bonded centrals reconnect without the passkey until removed (`APP_CMD_DEL_BLE_BONDED_DEVICE` / `APP_CMD_CLEAR_BLE_BONDED`). A change of the bonding flag takes effect at the next stack start (stop + start, or reboot).
 
 ### 7.6 WiFi Passthrough Channel
 
@@ -1525,8 +1528,10 @@ enable(u8/1B) + keep_idle(i32/4B LE) + keep_interval(i32/4B LE) + keep_count(i32
 | 4018 | `SET_BLE_TX_POWER` | 2 bytes: `type(u8)` + `power_level(u8)` |
 | 4019 | `GET_BLE_TX_POWER` | `uint8_t` type -> `uint8_t` power_level |
 | 4020 | `GET_BLE_SPP_STATUS` | (empty) -> `uint8_t` state (0=stopped, 1=started not connected, 2=connected) |
-| 4021 | `START_BLE_SPP` | (empty) |
+| 4021 | `START_BLE_SPP` | (empty). Acknowledged but a no-op while the persisted BLE switch (4023) is off: hosts send it unconditionally after an OTA, and the switch wins. |
 | 4022 | `STOP_BLE_SPP` | (empty) |
+| 4023 | `SET_BLE_ENABLE` | `uint8_t` 0=off 1=on -> `uint8_t` stored state. Persisted (`app_sys/ble_en`, default on); starts or stops the stack at once. Off = radio silent, nothing can connect, the host is reachable over USB/WiFi only. Unlike 4021/4022 it survives a reboot. |
+| 4024 | `GET_BLE_ENABLE` | (empty) -> `uint8_t` 0=off 1=on |
 
 **BLE TX power types**:
 
@@ -1645,14 +1650,17 @@ The module uses ESP-IDF NVS (Non-Volatile Storage) to persist configuration:
 During startup in `app_main()`, `app_nvs_flash_load()` loads configuration in this order:
 
 1. Time zone, then applies it immediately
-2. WiFi function mode, which determines later initialization path
-3. WiFi forwarding type
-4. WiFi TX power
-5. WiFi inactive timeout
-6. DHCP enable state
-7. MAC address (or uses the default eFuse value if not present)
-8. Static IP information
-9. Hostname
+2. Power-save switch (`pwr_save`)
+3. BLE switch (`ble_en`)
+4. WiFi function mode, which determines later initialization path
+5. WiFi forwarding type
+6. WiFi TX power
+7. WiFi power-save type (`wifi_ps`)
+8. WiFi inactive timeout
+9. DHCP enable state
+10. MAC address (or uses the default eFuse value if not present)
+11. Static IP information
+12. Hostname
 
 BLE-related settings are loaded in `app_ble_init()` -> `app_ble_load_persisted_params()`:
 - Bonding enable, pairing key, manufacturer data, device name, device address, notify retry limits, TX power
@@ -1903,7 +1911,7 @@ Send: APP_CMD_SET_TO_WIFI_FORWARD_MODE (2001) + 0x04 (MQTT Client)
 | 2400~2412 | UDP Server | 13 |
 | 2500~2512 | UDP Client | 13 |
 | 2600~2655 | MQTT Client | 56 |
-| 4000~4022 | BLE | 23 |
+| 4000~4024 | BLE | 25 |
 | 5000 | Passthrough | 1 |
 | **Total** | | **211** |
 

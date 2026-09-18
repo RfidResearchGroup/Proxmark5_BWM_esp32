@@ -276,6 +276,8 @@ typedef enum {
     APP_CMD_GET_BLE_SPP_STATUS                        ,    // BLE control: get BLE SPP service status
     APP_CMD_START_BLE_SPP                             ,    // BLE control: start BLE SPP service
     APP_CMD_STOP_BLE_SPP                              ,    // BLE control: stop BLE SPP service
+    APP_CMD_SET_BLE_ENABLE                            ,    // BLE control: set the persisted BLE switch, uint8_t 0=off 1=on; starts/stops the stack at once; response = stored state
+    APP_CMD_GET_BLE_ENABLE                            ,    // BLE control: get the persisted BLE switch, uint8_t 0=off 1=on
 
     /*
      * Other general commands; codes start at 5000.

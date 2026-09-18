@@ -9,6 +9,9 @@ esp_err_t settings_time_zone_load(char **tz_buf);
 esp_err_t settings_power_save_save(uint8_t enabled);
 esp_err_t settings_power_save_load(uint8_t *enabled, uint8_t default_enabled);
 
+esp_err_t settings_ble_enable_save(uint8_t enabled);
+esp_err_t settings_ble_enable_load(uint8_t *enabled, uint8_t default_enabled);
+
 esp_err_t settings_wifi_mode_save(int mode);
 esp_err_t settings_wifi_mode_load(int *mode, int default_mode);
 

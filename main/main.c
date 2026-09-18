@@ -81,6 +81,10 @@ static wifi_function_mode_t g_wifi_function_mode = WIFI_FUNCTION_MODE_WIFI_DISAB
 // Power-save switch as loaded from NVS for app_power_init(); the live state is
 // app_power_get_enabled(). Default on.
 static uint8_t power_save_boot = 1;
+// BLE switch (persisted, APP_CMD_SET_BLE_ENABLE): whether the BLE SPP stack is
+// started at boot. Off = the radio is silent and nothing can connect; the PM5
+// is then reachable over USB (or WiFi) only. Default on.
+static uint8_t ble_enable = 1;
 // Buffer for the WiFi STA mode MAC address
 static uint8_t wifi_sta_mac[6];
 // Default forwarding type is TCP_SERVER
@@ -3459,6 +3463,12 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         }
 
         case APP_CMD_START_BLE_SPP: {
+            // Hosts send this unconditionally after an OTA, having stopped BLE for
+            // the transfer; the persisted switch wins, so acknowledge and do nothing.
+            if (ble_enable == 0) {
+                app_uart_send_response(cmd, NULL, 0);
+                break;
+            }
             esp_err_t err = app_ble_start();
             if (err != ESP_OK) {
                 uart_cmd_error_report(cmd, err);
@@ -3475,6 +3485,39 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 break;
             }
             app_uart_send_response(cmd, NULL, 0);
+            break;
+        }
+
+        case APP_CMD_SET_BLE_ENABLE: {
+            if (length != 1 || p_data[0] > 1) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            // Apply first, persist second: a failure to apply is reported, a failure
+            // to persist only logged.
+            uint8_t state = 0;
+            (void)app_ble_get_state(&state);   // 0 = stopped
+            esp_err_t err = ESP_OK;
+            if (p_data[0] && state == 0) {
+                err = app_ble_start();
+            } else if (!p_data[0] && state != 0) {
+                err = app_ble_stop();
+            }
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
+            ble_enable = p_data[0];
+            err = settings_ble_enable_save(ble_enable);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to save ble enable to NVS: %s", esp_err_to_name(err));
+            }
+            app_uart_send_response(cmd, &ble_enable, sizeof(ble_enable));
+            break;
+        }
+
+        case APP_CMD_GET_BLE_ENABLE: {
+            app_uart_send_response(cmd, &ble_enable, sizeof(ble_enable));
             break;
         }
 
@@ -3534,6 +3577,13 @@ static void app_nvs_flash_load(void) {
     if (err == ESP_OK) {
         power_save_boot = (power_save_boot != 0) ? 1 : 0;
         ESP_LOGI(TAG, "Loaded power save from NVS: %u", (unsigned)power_save_boot);
+    }
+
+    // ----------------------------- Load BLE switch -----------------------------
+    err = settings_ble_enable_load(&ble_enable, ble_enable);
+    if (err == ESP_OK) {
+        ble_enable = (ble_enable != 0) ? 1 : 0;
+        ESP_LOGI(TAG, "Loaded ble enable from NVS: %u", (unsigned)ble_enable);
     }
 
     // ----------------------------- Load WiFi function mode configuration -----------------------------
@@ -3660,12 +3710,16 @@ void app_main(void) {
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_log_uart_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_log_uart_set_tx_callback(on_log_printf_uart_report));
 
-    // Always initialize the BLE forwarding module and keep it running;
-    // it stays available until a command switches the forwarding mode or sends data
+    // Always initialize the BLE forwarding module so its settings can be read and
+    // written; start it only if the persisted BLE switch says so.
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_set_rx_callback(on_forward_data_received));
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_set_link_callback(on_ble_link));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_start()); // Final BLE module start
+    if (ble_enable) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_start()); // Final BLE module start
+    } else {
+        ESP_LOGW(TAG, "BLE is switched off (APP_CMD_SET_BLE_ENABLE); not starting the stack");
+    }
 
     // Initialize the WiFi forwarding module based on the stored configuration
     if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
