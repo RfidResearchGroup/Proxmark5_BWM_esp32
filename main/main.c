@@ -23,6 +23,7 @@
 #include "app_mqtt_client.h"
 #include "app_ota_ops.h"
 #include "main_settings.h"
+#include "app_power.h"
 
 
 // Casts pointer p to type t and dereferences it to return the value.
@@ -77,6 +78,13 @@ static bool system_ready = false;
 // WiFi functional mode; defaults to disabled. May switch to WIFI_FORWARD mode after
 // loading config on boot (SCAN mode can only be started at runtime).
 static wifi_function_mode_t g_wifi_function_mode = WIFI_FUNCTION_MODE_WIFI_DISABLE;
+// Power-save switch as loaded from NVS for app_power_init(); the live state is
+// app_power_get_enabled(). Default on.
+static uint8_t power_save_boot = 1;
+// BLE switch (persisted, APP_CMD_SET_BLE_ENABLE): whether the BLE SPP stack is
+// started at boot. Off = the radio is silent and nothing can connect; the PM5
+// is then reachable over USB (or WiFi) only. Default on.
+static uint8_t ble_enable = 1;
 // Buffer for the WiFi STA mode MAC address
 static uint8_t wifi_sta_mac[6];
 // Default forwarding type is TCP_SERVER
@@ -86,6 +94,22 @@ static wifi_country_t wifi_country = { 0x00 };
 // WiFi TX power in dBm. Default is the compile-time maximum.
 // Note: this value uses 0.25 dBm steps, so divide by 0.25 to obtain the correct step count.
 static int8_t wifi_tx_power = CONFIG_ESP_PHY_MAX_WIFI_TX_POWER / 0.25;
+// WiFi modem power-save type (wifi_ps_type_t): 0 none, 1 min modem (the IDF default:
+// the modem sleeps between DTIM beacons), 2 max modem (sleeps for the configured
+// listen interval; lowest current, highest latency). Persisted; see
+// wifi_apply_ps_mode().
+static uint8_t wifi_ps_mode = WIFI_PS_MIN_MODEM;
+
+// Push wifi_ps_mode into the driver. Called wherever the driver is (re)initialised
+// or started, since init sets the IDF default. Harmless when WiFi is down.
+static esp_err_t wifi_apply_ps_mode(void) {
+    esp_err_t err = esp_wifi_set_ps((wifi_ps_type_t)wifi_ps_mode);
+    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "Failed to set wifi power save: %s", esp_err_to_name(err));
+        return err;
+    }
+    return ESP_OK;
+}
 // WiFi inactive time in seconds. Default is 6 s. If no data is exchanged within
 // this period after connection, WiFi is considered inactive and may enter power-saving mode.
 static uint16_t wifi_inactive_time = 6;
@@ -142,6 +166,34 @@ static void on_wifi_scan_result_report(wifi_scan_result_t *result, uint8_t count
 static void on_forward_data_received(uint8_t *data, uint16_t length) {
     // Forward received data to UART regardless of whether the source is BLE or WiFi
     app_uart_send_broadcast(APP_BROADCAST_DATA_FORWARD, (const uint8_t *)data, length); // Return value can be ignored
+}
+
+// Wireless client link state, pushed to the host as APP_BROADCAST_LINK_STATE on
+// every change (the host's idle power-off must not fire while a client is on).
+// The BLE callback runs in the NimBLE host task, the TCP one in the server task;
+// app_uart_send_broadcast is thread-safe and each flag is one byte, so no lock.
+static volatile uint8_t s_link_ble = 0;
+static volatile uint8_t s_link_wifi = 0;
+
+static void link_state_report(void) {
+    uint8_t payload[2] = { s_link_ble, s_link_wifi };
+    app_uart_send_broadcast(APP_BROADCAST_LINK_STATE, payload, sizeof(payload)); // Return value can be ignored
+}
+
+static void on_ble_link(bool connected) {
+    uint8_t v = connected ? 1 : 0;
+    if (s_link_ble != v) {
+        s_link_ble = v;
+        link_state_report();
+    }
+}
+
+static void on_tcp_link(bool connected) {
+    uint8_t v = connected ? 1 : 0;
+    if (s_link_wifi != v) {
+        s_link_wifi = v;
+        link_state_report();
+    }
 }
 
 /**
@@ -222,6 +274,7 @@ static esp_err_t wifi_connect_init_additional(void) {
         case WIFI_FORWARD_TCP_SERVER:
             RETURN_ON_FAILURE(app_tcp_server_init()); // Init TCP server; do not start yet — wait for WiFi IP
             RETURN_ON_FAILURE(app_tcp_server_set_rx_callback(on_forward_data_received)); // Register rx callback to forward data to UART
+            RETURN_ON_FAILURE(app_tcp_server_set_link_callback(on_tcp_link));
             break;
         case WIFI_FORWARD_TCP_CLIENT:
             RETURN_ON_FAILURE(app_tcp_client_init());
@@ -260,6 +313,7 @@ static esp_err_t wifi_connect_deinit_additional(void) {
     switch (wifi_forward_type) {
         case WIFI_FORWARD_TCP_SERVER:
             RETURN_ON_FAILURE(app_tcp_server_deinit());
+            on_tcp_link(false);   // the server is gone, so is any client
             RETURN_ON_FAILURE(app_tcp_server_set_rx_callback(NULL));
             break;
         case WIFI_FORWARD_TCP_CLIENT:
@@ -617,6 +671,69 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
             break;
         }
 
+        case APP_CMD_SET_SYS_POWER_SAVE: {
+            if (length != 1 || p_data[0] > 1) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            esp_err_t err = app_power_set_enabled(p_data[0] != 0);
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
+            // The switch is already applied: report that, and only log a
+            // failure to persist it.
+            err = settings_power_save_save(p_data[0]);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to save power save to NVS: %s", esp_err_to_name(err));
+            }
+            uint8_t state = app_power_get_enabled() ? 1 : 0;
+            app_uart_send_response(cmd, &state, sizeof(state));
+            break;
+        }
+
+        case APP_CMD_GET_SYS_POWER_SAVE: {
+            uint8_t state = app_power_get_enabled() ? 1 : 0;
+            app_uart_send_response(cmd, &state, sizeof(state));
+            break;
+        }
+
+        case APP_CMD_SET_SYS_HOST_VALUE: {
+            if (length != 5) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            uint32_t value;
+            memcpy(&value, &p_data[1], sizeof(value));
+            esp_err_t err = settings_host_value_save(p_data[0], value);
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
+            app_uart_send_response(cmd, (uint8_t *)&value, sizeof(value));
+            break;
+        }
+
+        case APP_CMD_GET_SYS_HOST_VALUE: {
+            if (length != 1) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            uint32_t value = 0;
+            bool present = false;
+            esp_err_t err = settings_host_value_load(p_data[0], &value, &present);
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
+            struct __attribute__((packed)) {
+                uint8_t present;
+                uint32_t value;
+            } resp = { present ? 1 : 0, value };
+            app_uart_send_response(cmd, (uint8_t *)&resp, sizeof(resp));
+            break;
+        }
+
         case APP_CMD_REBOOT: {
             ESP_LOGW(TAG, "Host requested reboot.");
             // Acknowledge before rebooting so the host knows a reboot is coming, not a timeout
@@ -739,6 +856,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 wifi_forward_type = new_wifi_forward_type;
                 // Initialize WiFi forward mode via the shared init helper
                 wifi_forward_common_init();
+                (void)wifi_apply_ps_mode();
             }
 
             ESP_LOGI(TAG, "Free Heap(after WIFI_FUNCTION_MODE_WIFI_FORWARD): %ld", esp_get_free_heap_size());
@@ -766,6 +884,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                     uart_cmd_error_report(cmd, err);
                     break;
                 }
+                (void)wifi_apply_ps_mode();
                 g_wifi_function_mode = WIFI_FUNCTION_MODE_WIFI_SCANNER;
                 ESP_LOGI(TAG, "Free Heap(after APP_CMD_SET_TO_WIFI_SCAN_MODE): %ld", esp_get_free_heap_size());
             }
@@ -1505,7 +1624,33 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 uart_cmd_error_report(cmd, err);
                 break;
             }
+            (void)wifi_apply_ps_mode();
             app_uart_send_response(cmd, NULL, 0);
+            break;
+        }
+
+        case APP_CMD_SET_WIFI_CFG_PS_MODE: {
+            if (length != 1 || p_data[0] > WIFI_PS_MAX_MODEM) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            wifi_ps_mode = p_data[0];
+            // Applied now if WiFi is up, else at the next start; a failure to persist is only logged.
+            esp_err_t err = wifi_apply_ps_mode();
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
+            err = settings_wifi_ps_mode_save(wifi_ps_mode);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to save wifi power save to NVS: %s", esp_err_to_name(err));
+            }
+            app_uart_send_response(cmd, &wifi_ps_mode, sizeof(wifi_ps_mode));
+            break;
+        }
+
+        case APP_CMD_GET_WIFI_CFG_PS_MODE: {
+            app_uart_send_response(cmd, &wifi_ps_mode, sizeof(wifi_ps_mode));
             break;
         }
 
@@ -1549,13 +1694,16 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         }
 
         case APP_CMD_SEND_FORWARD_DATA: {
-            // No need to validate data length; a zero-length packet may be valid
+            // No need to validate data length; a zero-length packet may be valid.
+            // Ack first: the ack tells the host the frame has left the UART ring,
+            // which is what its byte-window flow control budgets. Acking after the
+            // radio would add the whole radio pipeline to the host's window and
+            // throttle it to ~85 % of the UART rate; a delivery failure is logged.
+            app_uart_send_response(cmd, NULL, 0);
             esp_err_t err = tx_data_forward_from_uart(p_data, length);
             if (err != ESP_OK) {
-                uart_cmd_error_report(cmd, err);
-                break;
+                ESP_LOGW(TAG, "forward data (%u B) not delivered: %s", (unsigned)length, esp_err_to_name(err));
             }
-            app_uart_send_response(cmd, NULL, 0);
             break;
         }
 
@@ -3351,6 +3499,12 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         }
 
         case APP_CMD_START_BLE_SPP: {
+            // Hosts send this unconditionally after an OTA, having stopped BLE for
+            // the transfer; the persisted switch wins, so acknowledge and do nothing.
+            if (ble_enable == 0) {
+                app_uart_send_response(cmd, NULL, 0);
+                break;
+            }
             esp_err_t err = app_ble_start();
             if (err != ESP_OK) {
                 uart_cmd_error_report(cmd, err);
@@ -3370,7 +3524,43 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
             break;
         }
 
+        case APP_CMD_SET_BLE_ENABLE: {
+            if (length != 1 || p_data[0] > 1) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            // Apply first, persist second: a failure to apply is reported, a failure
+            // to persist only logged.
+            uint8_t state = 0;
+            (void)app_ble_get_state(&state);   // 0 = stopped
+            esp_err_t err = ESP_OK;
+            if (p_data[0] && state == 0) {
+                err = app_ble_start();
+            } else if (!p_data[0] && state != 0) {
+                err = app_ble_stop();
+            }
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
+            ble_enable = p_data[0];
+            err = settings_ble_enable_save(ble_enable);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to save ble enable to NVS: %s", esp_err_to_name(err));
+            }
+            app_uart_send_response(cmd, &ble_enable, sizeof(ble_enable));
+            break;
+        }
+
+        case APP_CMD_GET_BLE_ENABLE: {
+            app_uart_send_response(cmd, &ble_enable, sizeof(ble_enable));
+            break;
+        }
+
         default:
+            // Fail fast instead of staying silent: the host would otherwise
+            // wait out its timeout on every command this firmware predates.
+            uart_cmd_error_report(cmd, ESP_ERR_NOT_SUPPORTED);
             break;
     }
 }
@@ -3418,6 +3608,20 @@ static void app_nvs_flash_load(void) {
         free(timezone); // The load function allocates memory for the string; free it after use to avoid leaks
     }
 
+    // ----------------------------- Load power-save switch -----------------------------
+    err = settings_power_save_load(&power_save_boot, power_save_boot);
+    if (err == ESP_OK) {
+        power_save_boot = (power_save_boot != 0) ? 1 : 0;
+        ESP_LOGI(TAG, "Loaded power save from NVS: %u", (unsigned)power_save_boot);
+    }
+
+    // ----------------------------- Load BLE switch -----------------------------
+    err = settings_ble_enable_load(&ble_enable, ble_enable);
+    if (err == ESP_OK) {
+        ble_enable = (ble_enable != 0) ? 1 : 0;
+        ESP_LOGI(TAG, "Loaded ble enable from NVS: %u", (unsigned)ble_enable);
+    }
+
     // ----------------------------- Load WiFi function mode configuration -----------------------------
     int wifi_mode = 0;
     err = settings_wifi_mode_load(&wifi_mode, g_wifi_function_mode);
@@ -3440,6 +3644,14 @@ static void app_nvs_flash_load(void) {
     if (err == ESP_OK) {
         wifi_tx_power = tx_pwr;
         ESP_LOGI(TAG, "Loaded wifi tx power from NVS: %d", tx_pwr);
+    }
+
+    // ----------------------------- Load WiFi power-save type -----------------------------
+    uint8_t ps_mode;
+    err = settings_wifi_ps_mode_load(&ps_mode, wifi_ps_mode);
+    if (err == ESP_OK && ps_mode <= WIFI_PS_MAX_MODEM) {
+        wifi_ps_mode = ps_mode;
+        ESP_LOGI(TAG, "Loaded wifi power save from NVS: %u", (unsigned)ps_mode);
     }
 
     // ----------------------------- Load WiFi inactive_time configuration -----------------------------
@@ -3521,6 +3733,10 @@ void app_main(void) {
     ESP_ERROR_CHECK(app_uart_set_command_callback(on_uart_cmd_complete));
     ESP_ERROR_CHECK(app_uart_set_baudrate_change_callback(on_uart_cmd_baudrate_change));
 
+    // Before the BLE stack starts, so its first advertising run already uses the
+    // right interval. Persisted; see app_power.h and APP_CMD_SET_SYS_POWER_SAVE.
+    ESP_ERROR_CHECK_WITHOUT_ABORT(app_power_init(power_save_boot != 0));
+
     // DO NOT use ESP_ERROR_CHECK for the following section.
     // If any module fails to initialize, ESP_ERROR_CHECK would trigger an infinite reboot,
     // preventing the device from entering normal operation to receive commands.
@@ -3530,11 +3746,16 @@ void app_main(void) {
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_log_uart_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_log_uart_set_tx_callback(on_log_printf_uart_report));
 
-    // Always initialize the BLE forwarding module and keep it running;
-    // it stays available until a command switches the forwarding mode or sends data
+    // Always initialize the BLE forwarding module so its settings can be read and
+    // written; start it only if the persisted BLE switch says so.
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_set_rx_callback(on_forward_data_received));
-    ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_start()); // Final BLE module start
+    ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_set_link_callback(on_ble_link));
+    if (ble_enable) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_start()); // Final BLE module start
+    } else {
+        ESP_LOGW(TAG, "BLE is switched off (APP_CMD_SET_BLE_ENABLE); not starting the stack");
+    }
 
     // Initialize the WiFi forwarding module based on the stored configuration
     if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
@@ -3550,6 +3771,7 @@ void app_main(void) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mac(WIFI_IF_STA, wifi_sta_mac));
         ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_connect_start());
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_max_tx_power(wifi_tx_power));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_apply_ps_mode());
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_inactive_time(WIFI_IF_STA, wifi_inactive_time));
     }
 

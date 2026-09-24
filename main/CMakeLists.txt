@@ -13,6 +13,7 @@ set(components
     app_uart_cmd 
     app_ota_ops 
     app_ble_spp 
+    app_power 
     app_mqtt_client 
     app_tcp_client 
     app_tcp_server 

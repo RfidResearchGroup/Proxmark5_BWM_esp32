@@ -8,6 +8,7 @@ typedef enum {
     APP_BROADCAST_DATA_FORWARD                  = 8089,    // Transparent-forward data
     APP_BROADCAST_SYS_LOG_MESSAGE               = 8090,    // System log message; all ESP_LOGx output is also forwarded here
     APP_BROADCAST_CMD_ERROR                     = 8091,    // Command execution failure report; payload is cmd(uint16) + err(int32)
+    APP_BROADCAST_LINK_STATE                    = 8092,    // Wireless client link state; payload ble(uint8) + wifi(uint8), 1 = a client is connected. Sent on every change.
 } app_broadcast_type_t;
 
 
@@ -39,6 +40,10 @@ typedef enum {
     APP_CMD_SET_LOG_LEVEL                             ,    // Set log output level
     APP_CMD_GET_LOG_LEVEL                             ,    // Get log output level
     APP_CMD_GET_SYS_READY_STATUS                      ,    // Get system ready status; only safe to call other commands after system is ready
+    APP_CMD_SET_SYS_POWER_SAVE                        ,    // Set power-save mode (persisted); payload uint8_t 0=off 1=on; response = applied state
+    APP_CMD_GET_SYS_POWER_SAVE                        ,    // Get power-save mode; response uint8_t 0=off 1=on
+    APP_CMD_SET_SYS_HOST_VALUE                        ,    // Persist a host (PM5) setting: payload id(uint8) + value(uint32 LE); response = the stored uint32. The module only stores it.
+    APP_CMD_GET_SYS_HOST_VALUE                        ,    // Read a host setting: payload id(uint8); response present(uint8) + value(uint32 LE), present 0 = never set
 
     // --- NOTE: OTA and reboot commands are critical for firmware download during development;
     //  do NOT change their codes (order). Add new OTA-related commands after these entries
@@ -105,6 +110,8 @@ typedef enum {
     APP_CMD_STOP_WIFI_CONNECT_TASK                    ,    // Stop WiFi connection task; disconnects any existing connection
     APP_CMD_GET_WIFI_CONNECT_STATUS                   ,    // Get WiFi connection task status
     APP_CMD_WAIT_FOR_WIFI_CONNECT_TASK                ,    // Wait for WiFi connection task to succeed, fail, or timeout
+    APP_CMD_SET_WIFI_CFG_PS_MODE                      ,    // WiFi config: set modem power-save type (persisted): uint8_t 0=none 1=min (default) 2=max
+    APP_CMD_GET_WIFI_CFG_PS_MODE                      ,    // WiFi config: get modem power-save type: uint8_t
 
     /*
      * TCP server commands; codes start at 2200.
@@ -271,6 +278,8 @@ typedef enum {
     APP_CMD_GET_BLE_SPP_STATUS                        ,    // BLE control: get BLE SPP service status
     APP_CMD_START_BLE_SPP                             ,    // BLE control: start BLE SPP service
     APP_CMD_STOP_BLE_SPP                              ,    // BLE control: stop BLE SPP service
+    APP_CMD_SET_BLE_ENABLE                            ,    // BLE control: set the persisted BLE switch, uint8_t 0=off 1=on; starts/stops the stack at once; response = stored state
+    APP_CMD_GET_BLE_ENABLE                            ,    // BLE control: get the persisted BLE switch, uint8_t 0=off 1=on
 
     /*
      * Other general commands; codes start at 5000.

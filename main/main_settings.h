@@ -6,11 +6,23 @@
 esp_err_t settings_time_zone_save(const char *tz);
 esp_err_t settings_time_zone_load(char **tz_buf);
 
+esp_err_t settings_power_save_save(uint8_t enabled);
+esp_err_t settings_power_save_load(uint8_t *enabled, uint8_t default_enabled);
+
+esp_err_t settings_ble_enable_save(uint8_t enabled);
+esp_err_t settings_ble_enable_load(uint8_t *enabled, uint8_t default_enabled);
+
+esp_err_t settings_host_value_save(uint8_t id, uint32_t value);
+esp_err_t settings_host_value_load(uint8_t id, uint32_t *value, bool *present);
+
 esp_err_t settings_wifi_mode_save(int mode);
 esp_err_t settings_wifi_mode_load(int *mode, int default_mode);
 
 esp_err_t settings_wifi_forward_type_save(int forward_type);
 esp_err_t settings_wifi_forward_type_load(int *forward_type, int default_type);
+
+esp_err_t settings_wifi_ps_mode_save(uint8_t ps_mode);
+esp_err_t settings_wifi_ps_mode_load(uint8_t *ps_mode, uint8_t default_mode);
 
 esp_err_t settings_wifi_tx_pwr_save(int8_t tx_pwr);
 esp_err_t settings_wifi_tx_pwr_load(int8_t *tx_pwr, int8_t default_pwr);

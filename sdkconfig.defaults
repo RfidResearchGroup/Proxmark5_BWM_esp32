@@ -39,3 +39,33 @@ CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=2048
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 CONFIG_SPI_FLASH_AUTO_SUSPEND=y
+
+# --- Idle power ---------------------------------------------------------------
+# WARN by default: INFO on the console UART cost a vsnprintf per event and, with
+# log forwarding on, a second one for the host. The max stays at INFO so the host
+# can raise it at runtime with APP_CMD_SET_LOG_LEVEL when it wants the detail.
+CONFIG_LOG_DEFAULT_LEVEL_WARN=y
+CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
+# Dynamic frequency scaling; app_power.c decides between DFS + light sleep and an
+# always-on clock. Under DFS the CPU parks on the 26 MHz crystal and the BBPLL goes
+# off with it (no PLL consumer refcount on the C2), so the command UART must NOT use
+# the default PLL_F40M clock: app_cmd_uart.c selects UART_SCLK_XTAL. Restoring
+# PLL_F40M there kills the host link.
+CONFIG_PM_ENABLE=y
+CONFIG_PM_DFS_INIT_AUTO=y
+# Automatic light sleep from the idle task once no lock is held. PM_DFS_INIT_AUTO
+# does not switch it on; app_power.c does, while the power-save switch is on. The
+# command UART keeps its own no-light-sleep lock around traffic (app_cmd_uart.c).
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+# Without this the BLE controller holds the max-frequency lock for as long as it
+# is enabled (always), which would make DFS a no-op. With it the controller drops
+# the lock and powers the BT PHY down between advertising / connection events.
+# LP clock is the main crystal (default): the module has no 32.768 kHz crystal.
+CONFIG_BT_LE_SLEEP_ENABLE=y
+# Sleep entry/exit and the RTOS idle path run from IRAM, so each light sleep
+# starts a little sooner and lasts a little longer. NOT ESP_SLEEP_POWER_DOWN_FLASH:
+# in IDF 5.5 that powers the flash down on any sleep longer than a few ms even
+# with the UART and BT wake sources armed, and a wake during the power-down
+# window can fault the flash (see "Power-down of Flash" in the IDF sleep docs).
+CONFIG_PM_SLP_IRAM_OPT=y
+CONFIG_PM_RTOS_IDLE_OPT=y

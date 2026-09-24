@@ -3,6 +3,12 @@
 #include "driver/uart.h"
 #include "esp_rom_uart.h"
 #include "app_cmd_uart.h"
+#if CONFIG_PM_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE
+#include "esp_pm.h"
+#include "esp_sleep.h"
+#include "esp_timer.h"
+#define UART_LINK_SLEEP 1
+#endif
 
 
 static const char *TAG = "uart";
@@ -12,6 +18,91 @@ static app_uart_baudrate_change_callback_t s_baudrate_change_callback = NULL;
 static UartParserCtx_t s_ctx = { .state = STATE_IDLE };
 static TickType_t s_ticks_wait_event = portMAX_DELAY;
 static uint32_t s_uart_baud_rate = UART_BAUD_RATE_DEFAULT;
+
+#if UART_LINK_SLEEP
+// Light sleep vs. the host link. The host (AT32) sends frames unsolicited and the
+// UART can only wake the chip on RX edges, losing the bytes that carried them, so
+// after a quiet spell the host leads with a throw-away preamble and waits a few ms
+// before the real frame (bwm_uart_at32.c in the proxmark3 tree); the parser drops
+// it as noise. Any traffic holds a no-light-sleep lock for UART_LINK_AWAKE_MS; the
+// lock is only dropped once a preamble was seen, since a host that sends none
+// would lose every frame after a quiet spell.
+// DFS is unaffected by this lock: the driver holds APB_FREQ_MAX during transfers.
+#define UART_LINK_AWAKE_MS      2000    // keep in step with BWM_ESP_AWAKE_MS on the host
+#define UART_LINK_WAKEUP_EDGES  3       // RX rising edges that end light sleep (hw minimum)
+#define UART_LINK_PREAMBLE_BYTE 0x55    // the host sends 4 of these; never a frame header byte
+#define UART_LINK_PREAMBLE_RUN  3       // consecutive ones that count as a preamble (margin of one)
+static esp_pm_lock_handle_t s_link_lock = NULL;
+static esp_timer_handle_t s_link_timer = NULL;
+static portMUX_TYPE s_link_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool s_link_awake = false;
+static volatile bool s_host_preamble = false;   // set once, never cleared: false = never light sleep
+
+// esp_timer task: nothing on the link for UART_LINK_AWAKE_MS, allow light sleep.
+// No preamble seen yet: the lock stays held, s_link_awake stays true, and the
+// next link_touch() re-arms the timer.
+static void link_idle_cb(void *arg) {
+    portENTER_CRITICAL(&s_link_mux);
+    if (s_link_awake && s_host_preamble) {
+        s_link_awake = false;
+        esp_pm_lock_release(s_link_lock);   // ISR-safe, may nest in a critical section
+    }
+    portEXIT_CRITICAL(&s_link_mux);
+}
+
+// Fed every STATE_IDLE byte; the parser itself still drops the preamble as noise.
+static inline void link_preamble_scan(uint8_t byte) {
+    static uint8_t run = 0;
+    if (byte != UART_LINK_PREAMBLE_BYTE) {
+        run = 0;
+    } else if (++run >= UART_LINK_PREAMBLE_RUN) {
+        run = 0;
+        s_host_preamble = true;
+    }
+}
+
+// Any task that moves bytes on the link: hold the chip awake a while longer.
+static void link_touch(void) {
+    if (s_link_lock == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_link_mux);
+    if (!s_link_awake) {
+        s_link_awake = true;
+        esp_pm_lock_acquire(s_link_lock);
+    }
+    // Re-arm inside the critical section: an expiry landing between the lock
+    // acquire and the restart would otherwise release the lock we just took.
+    esp_timer_stop(s_link_timer);   // ESP_ERR_INVALID_STATE if not running: fine
+    esp_timer_start_once(s_link_timer, (uint64_t)UART_LINK_AWAKE_MS * 1000ULL);
+    portEXIT_CRITICAL(&s_link_mux);
+}
+
+static esp_err_t link_sleep_init(void) {
+    esp_err_t err = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "uart_link", &s_link_lock);
+    if (err != ESP_OK) {
+        return err;
+    }
+    const esp_timer_create_args_t targs = { .callback = link_idle_cb, .name = "uart_link" };
+    err = esp_timer_create(&targs, &s_link_timer);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = uart_set_wakeup_threshold(UART_SPP_NUM, UART_LINK_WAKEUP_EDGES);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = esp_sleep_enable_uart_wakeup(UART_SPP_NUM);
+    if (err != ESP_OK) {
+        return err;
+    }
+    link_touch();   // stay awake through boot and the host's link bring-up
+    return ESP_OK;
+}
+#else
+static inline void link_touch(void) {}
+static inline void link_preamble_scan(uint8_t byte) { (void)byte; }
+#endif
 
 
 /**
@@ -90,6 +181,7 @@ static esp_err_t uart_build_and_send(uint8_t hdr1, uint8_t hdr2, uint16_t cmd, c
     pkt_buf[idx++] = (crc >> 8) & 0xFF;
 
     // 6. Send
+    link_touch();   // a reply usually follows: keep the chip out of light sleep
     int written = uart_write_bytes(UART_SPP_NUM, pkt_buf, total_len);
     
     // After uart_write_bytes, data is copied to FIFO or sent directly via peripheral, can now free allocated memory
@@ -115,6 +207,7 @@ static void uart_rx_parser(uint8_t *data, size_t size) {
 
         switch (ctx->state) {
             case STATE_IDLE:
+                link_preamble_scan(byte);
                 if (byte == HDR_HOST_CMD_1) { 
                     ctx->pkt_type = TYPE_HOST_CMD; 
                     ctx->first_hdr_byte = byte; 
@@ -265,32 +358,20 @@ static void uart_rx_task(void *pvParameters) {
         if (xQueueReceive(s_spp_common_uart_queue, (void *)&event, s_ticks_wait_event)) {
             switch (event.type) {
                 case UART_DATA: {
-                    // First check current buffer data length, if exceeds threshold use heap memory, else use stack memory to reduce fragmentation risk
-                    int length_in_buffer = 0;
-                    uart_get_buffered_data_len(UART_SPP_NUM, (size_t*)&length_in_buffer);
-                    bool use_heap = (length_in_buffer > 256);
-                    uint8_t *rbuf = NULL; // Optimization: small data uses stack, large data uses heap, reduce fragmentation
-                    uint8_t buffer_stack[256]; // Allocate max 256 bytes on stack, sufficient for most small packets
-                    if (use_heap) {
-                        rbuf = (uint8_t *)malloc(length_in_buffer);
-                        if (!rbuf) {
-                            ESP_LOGE(TAG, "Malloc failed for UART of CMD data, length: %d", length_in_buffer);
+                    link_touch();
+                    // Drain the driver's ring in UART_RX_CHUNK pieces. The chunk bounds
+                    // memory (this task is the only reader, so one static buffer); the
+                    // loop matters because the driver queues UART_DATA on arrival only,
+                    // so bytes left behind by a partial read would wait for the next burst.
+                    static uint8_t rbuf[UART_RX_CHUNK];
+                    size_t buffered = 0;
+                    while ((uart_get_buffered_data_len(UART_SPP_NUM, &buffered) == ESP_OK) && (buffered > 0)) {
+                        size_t want = (buffered < sizeof(rbuf)) ? buffered : sizeof(rbuf);
+                        int read_len = uart_read_bytes(UART_SPP_NUM, rbuf, want, 0);   // already buffered: no wait
+                        if (read_len <= 0) {
                             break;
                         }
-                    } else {
-                        rbuf = buffer_stack;
-                    }
-                    // Read available bytes from UART RX buffer
-                    int read_len = uart_read_bytes(UART_SPP_NUM, rbuf, length_in_buffer, pdMS_TO_TICKS(UART_RX_TIMEOUT));
-                    // ESP_LOGI(TAG, "UART Event: Data received, length = %d", read_len);
-                    // ESP_LOG_BUFFER_HEX(TAG, rbuf, read_len); // This print may trigger watchdog as data can be large
-                    // Parse received payload when data is present
-                    if (read_len > 0) {
                         uart_rx_parser(rbuf, read_len);
-                    }
-                    // Release temporary heap buffer if used
-                    if (use_heap && rbuf) {
-                        free(rbuf);
                     }
                     // If last buffer byte is used by user data, may have stack overflow, very serious error
                     if (s_ctx.payload_buf[MAX_PAYLOAD_LEN] != 0x00) {
@@ -312,6 +393,13 @@ static void uart_rx_task(void *pvParameters) {
                 case UART_BUFFER_FULL:
                     reset_on_error("UART Overflow or Buffer Full");
                     break;
+#if SOC_UART_SUPPORT_WAKEUP_INT
+                case UART_WAKEUP:
+                    // RX edges ended light sleep; the bytes that did it are gone
+                    // (the host sent a disposable preamble for that reason).
+                    link_touch();
+                    break;
+#endif
                 default:
                     break;
             }
@@ -336,7 +424,11 @@ esp_err_t app_uart_init(void)
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
+        // XTAL, not the default PLL_F40M: under DFS the PLL is powered down whenever
+        // no APB lock is held and the driver only raises it inside a read/write call,
+        // so a frame the host sends unsolicited would arrive with a dead baud clock.
+        // The 26 MHz crystal runs at every CPU frequency and clocks 460800 and 921600.
+        .source_clk = UART_SCLK_XTAL,
     };
 
     int intr_alloc_flags = 0; // UART 
@@ -359,6 +451,13 @@ esp_err_t app_uart_init(void)
     if (err != ESP_OK) {
         return err;
     }
+#if UART_LINK_SLEEP
+    err = link_sleep_init();
+    if (err != ESP_OK) {
+        // Not fatal for the link itself, only for the power saving.
+        ESP_LOGW(TAG, "UART light-sleep wakeup setup failed: %s", esp_err_to_name(err));
+    }
+#endif
     // Start instruction UART receive task to handle instruction data anytime
     xTaskCreate(uart_rx_task, "uTask", 4096, (void *)UART_SPP_NUM, 8, NULL);
     ESP_LOGI(TAG, "UART Initialized");
