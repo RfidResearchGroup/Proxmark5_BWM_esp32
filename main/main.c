@@ -16,6 +16,7 @@
 #include "app_wifi_scanner.h"
 #include "app_wifi_connect.h"
 #include "app_wifi_netif_cfg.h"
+#include "app_wifi_mdns.h"
 #include "app_tcp_server.h"
 #include "app_tcp_client.h"
 #include "app_udp_server.h"
@@ -155,6 +156,14 @@ static void on_forward_data_received(uint8_t *data, uint16_t length) {
 static void on_wifi_connect_gotip(bool ip_changed) {
     // Start SNTP service
     app_wifi_sntp_start();
+    // mDNS: <hostname>.local
+    {
+        uint16_t mdns_port = 0;
+        if (wifi_forward_type == WIFI_FORWARD_TCP_SERVER) {
+            app_tcp_server_get_port(&mdns_port);
+        }
+        app_wifi_mdns_start(wifi_host_name, mdns_port);
+    }
     // Start the forwarding application for the current WiFi forward type
     switch (wifi_forward_type) {
         case WIFI_FORWARD_TCP_SERVER:
@@ -185,6 +194,7 @@ static void on_wifi_connect_gotip(bool ip_changed) {
 static void on_wifi_disconnect(void) {
     // Stop SNTP service
     app_wifi_sntp_stop();
+    app_wifi_mdns_stop();
     // Stop the forwarding service for the current WiFi forward type
     switch (wifi_forward_type) {
         case WIFI_FORWARD_TCP_SERVER:
@@ -1179,6 +1189,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 uart_cmd_error_report(cmd, err);
                 break;
             }
+            app_wifi_mdns_set_hostname((const char*)wifi_host_name);
 
             app_uart_send_response(cmd, NULL, 0);
             break;
