@@ -35,4 +35,10 @@ menu "Proxmark5 BLE/WiFi Module Configuration"
         help
             The device identifier is used as the like hostname on network or BLE name.
 
+    config PM5_MDNS_ENABLE
+        bool "Enable mDNS responder (<device identifier>.local)"
+        default y
+        help
+            Answer mDNS queries for the WiFi hostname on the STA interface.
+
 endmenu

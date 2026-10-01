@@ -22,6 +22,7 @@ set(components
     app_wifi_connect 
     app_wifi_sntp 
     app_wifi_netif_cfg
+    app_wifi_mdns
 )
 
 # Register component
