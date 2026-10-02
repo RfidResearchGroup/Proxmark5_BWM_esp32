@@ -389,6 +389,8 @@ static esp_err_t wifi_forward_common_init(void) {
     RETURN_ON_FAILURE(app_wifi_connect_set_callback(APP_WIFI_CONNECT_CALLBACK_DISCONN, on_wifi_disconnect));
     // Initialize supplemental WiFi resources
     RETURN_ON_FAILURE(wifi_connect_init_additional());
+    // mDNS needs the event loop created above
+    ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_mdns_start(wifi_host_name));
     return ESP_OK;
 }
 
@@ -674,6 +676,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         case APP_CMD_SET_TO_WIFI_DISABLE_MODE: {
             if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
                 wifi_connect_deinit_additional();
+                app_wifi_mdns_stop();
                 app_wifi_connect_deinit();
             } else if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_SCANNER) {
                 app_wifi_scanner_deinit();
@@ -750,6 +753,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         case APP_CMD_SET_TO_WIFI_SCAN_MODE: {
             if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
                 wifi_connect_deinit_additional();
+                app_wifi_mdns_stop();
                 app_wifi_connect_deinit();
             }
 
@@ -3549,7 +3553,6 @@ void app_main(void) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_ipv4(wifi_ip_info[0], wifi_ip_info[1], wifi_ip_info[2]));
         }
         ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_host_name(wifi_host_name));
-        ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_mdns_start(wifi_host_name));
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mac(WIFI_IF_STA, wifi_sta_mac));
         ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_connect_start());
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_max_tx_power(wifi_tx_power));
