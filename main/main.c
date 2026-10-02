@@ -156,14 +156,6 @@ static void on_forward_data_received(uint8_t *data, uint16_t length) {
 static void on_wifi_connect_gotip(bool ip_changed) {
     // Start SNTP service
     app_wifi_sntp_start();
-    // mDNS: <hostname>.local
-    {
-        uint16_t mdns_port = 0;
-        if (wifi_forward_type == WIFI_FORWARD_TCP_SERVER) {
-            app_tcp_server_get_port(&mdns_port);
-        }
-        app_wifi_mdns_start(wifi_host_name, mdns_port);
-    }
     // Start the forwarding application for the current WiFi forward type
     switch (wifi_forward_type) {
         case WIFI_FORWARD_TCP_SERVER:
@@ -194,7 +186,6 @@ static void on_wifi_connect_gotip(bool ip_changed) {
 static void on_wifi_disconnect(void) {
     // Stop SNTP service
     app_wifi_sntp_stop();
-    app_wifi_mdns_stop();
     // Stop the forwarding service for the current WiFi forward type
     switch (wifi_forward_type) {
         case WIFI_FORWARD_TCP_SERVER:
@@ -398,6 +389,8 @@ static esp_err_t wifi_forward_common_init(void) {
     RETURN_ON_FAILURE(app_wifi_connect_set_callback(APP_WIFI_CONNECT_CALLBACK_DISCONN, on_wifi_disconnect));
     // Initialize supplemental WiFi resources
     RETURN_ON_FAILURE(wifi_connect_init_additional());
+    // mDNS needs the event loop created above
+    ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_mdns_start(wifi_host_name));
     return ESP_OK;
 }
 
@@ -683,6 +676,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         case APP_CMD_SET_TO_WIFI_DISABLE_MODE: {
             if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
                 wifi_connect_deinit_additional();
+                app_wifi_mdns_stop();
                 app_wifi_connect_deinit();
             } else if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_SCANNER) {
                 app_wifi_scanner_deinit();
@@ -759,6 +753,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         case APP_CMD_SET_TO_WIFI_SCAN_MODE: {
             if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
                 wifi_connect_deinit_additional();
+                app_wifi_mdns_stop();
                 app_wifi_connect_deinit();
             }
 
