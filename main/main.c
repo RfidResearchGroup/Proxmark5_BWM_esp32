@@ -156,14 +156,6 @@ static void on_forward_data_received(uint8_t *data, uint16_t length) {
 static void on_wifi_connect_gotip(bool ip_changed) {
     // Start SNTP service
     app_wifi_sntp_start();
-    // mDNS: <hostname>.local
-    {
-        uint16_t mdns_port = 0;
-        if (wifi_forward_type == WIFI_FORWARD_TCP_SERVER) {
-            app_tcp_server_get_port(&mdns_port);
-        }
-        app_wifi_mdns_start(wifi_host_name, mdns_port);
-    }
     // Start the forwarding application for the current WiFi forward type
     switch (wifi_forward_type) {
         case WIFI_FORWARD_TCP_SERVER:
@@ -194,7 +186,6 @@ static void on_wifi_connect_gotip(bool ip_changed) {
 static void on_wifi_disconnect(void) {
     // Stop SNTP service
     app_wifi_sntp_stop();
-    app_wifi_mdns_stop();
     // Stop the forwarding service for the current WiFi forward type
     switch (wifi_forward_type) {
         case WIFI_FORWARD_TCP_SERVER:
@@ -3558,6 +3549,7 @@ void app_main(void) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_ipv4(wifi_ip_info[0], wifi_ip_info[1], wifi_ip_info[2]));
         }
         ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_host_name(wifi_host_name));
+        ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_mdns_start(wifi_host_name));
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mac(WIFI_IF_STA, wifi_sta_mac));
         ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_connect_start());
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_max_tx_power(wifi_tx_power));
