@@ -49,6 +49,13 @@ esp_err_t app_wifi_mdns_start(const char *hostname) {
     return err;
 }
 
+void app_wifi_mdns_stop(void) {
+    if (s_started) {
+        mdns_free();
+        s_started = false;
+    }
+}
+
 esp_err_t app_wifi_mdns_set_hostname(const char *hostname) {
     if (!s_started) {
         return ESP_OK;
@@ -63,5 +70,6 @@ esp_err_t app_wifi_mdns_set_hostname(const char *hostname) {
 
 esp_err_t app_wifi_mdns_start(const char *hostname) { (void)hostname; return ESP_OK; }
 esp_err_t app_wifi_mdns_set_hostname(const char *hostname) { (void)hostname; return ESP_OK; }
+void app_wifi_mdns_stop(void) {}
 
 #endif
