@@ -313,25 +313,25 @@ static esp_err_t wifi_connect_deinit_additional(void) {
     // Release resources for the current forwarding protocol type
     switch (wifi_forward_type) {
         case WIFI_FORWARD_TCP_SERVER:
+            RETURN_ON_FAILURE(app_tcp_server_set_rx_callback(NULL));
             RETURN_ON_FAILURE(app_tcp_server_deinit());
             on_tcp_link(false);   // the server is gone, so is any client
-            RETURN_ON_FAILURE(app_tcp_server_set_rx_callback(NULL));
             break;
         case WIFI_FORWARD_TCP_CLIENT:
-            RETURN_ON_FAILURE(app_tcp_client_deinit());
             RETURN_ON_FAILURE(app_tcp_client_set_rx_callback(NULL));
+            RETURN_ON_FAILURE(app_tcp_client_deinit());
             break;
         case WIFI_FORWARD_UDP_SERVER:
-            RETURN_ON_FAILURE(app_udp_server_deinit());
             RETURN_ON_FAILURE(app_udp_server_set_rx_callback(NULL));
+            RETURN_ON_FAILURE(app_udp_server_deinit());
             break;
         case WIFI_FORWARD_UDP_CLIENT:
-            RETURN_ON_FAILURE(app_udp_client_deinit());
             RETURN_ON_FAILURE(app_udp_client_set_rx_callback(NULL));
+            RETURN_ON_FAILURE(app_udp_client_deinit());
             break;
         case WIFI_FORWARD_MQTT_CLIENT:
-            RETURN_ON_FAILURE(app_mqtt_deinit());
             RETURN_ON_FAILURE(app_mqtt_set_rx_callback(NULL));
+            RETURN_ON_FAILURE(app_mqtt_deinit());
             break;
         default:
             break;
