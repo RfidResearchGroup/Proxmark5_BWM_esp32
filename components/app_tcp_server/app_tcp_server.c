@@ -64,6 +64,7 @@ typedef struct {
     volatile bool task_running;
     volatile bool server_stop;
     app_tcp_server_rx_callback_t rx_callback;
+    app_tcp_server_link_callback_t link_callback;
     uint16_t server_port;
     uint8_t rx_buffer[CONFIG_CMD_PAYLOAD_SIZE];
     uint8_t server_ip_mode;
@@ -430,6 +431,9 @@ static void tcp_server_task(void *pvParameters) {
             }
 
             ESP_LOGI(TAG, "Socket client connected");
+            if (ctx->link_callback) {
+                ctx->link_callback(true);
+            }
 
             tcp_client_set_opt(ctx);
             tcp_printf_address(&source_addr);
@@ -437,6 +441,9 @@ static void tcp_server_task(void *pvParameters) {
             close_client_socket(ctx);
 
             ESP_LOGI(TAG, "Socket client disconnected");
+            if (ctx->link_callback) {
+                ctx->link_callback(false);
+            }
         }
         
         close_server_socket(ctx);
@@ -647,6 +654,14 @@ esp_err_t app_tcp_server_set_rx_callback(app_tcp_server_rx_callback_t callback) 
         return ESP_ERR_INVALID_STATE;
     }
     s_ctx->rx_callback = callback;
+    return ESP_OK;
+}
+
+esp_err_t app_tcp_server_set_link_callback(app_tcp_server_link_callback_t callback) {
+    if (s_ctx == NULL || s_ctx->task_handle == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_ctx->link_callback = callback;
     return ESP_OK;
 }
 

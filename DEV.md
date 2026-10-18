@@ -61,6 +61,7 @@ This firmware runs on an ESP32-C2 (ESP8684) module as a BLE/WiFi wireless expans
 |----------|------|
 | `main/` | Main program entry, command routing, global state management, persistent configuration |
 | `app_uart_cmd/` | UART command/response packet I/O, CRC verification, state-machine parsing |
+| `app_power/` | Runtime power-save switch: DFS, light sleep, advertising interval |
 | `app_uart_log/` | Forward system logs to UART |
 | `app_ble_spp/` | BLE SPP (Serial Port Profile) server based on the NimBLE stack |
 | `app_wifi_connect/` | WiFi STA connection management (auto-reconnect, event callbacks) |
@@ -82,15 +83,17 @@ This firmware runs on an ESP32-C2 (ESP8684) module as a BLE/WiFi wireless expans
 app_main()
    ├── srand(esp_random())              // Random seed
    ├── app_nvs_flash_init()             // Initialize NVS partition
-   ├── app_nvs_flash_load()             // Load persisted configuration
+   ├── app_nvs_flash_load()             // Load persisted configuration (incl. power save, WiFi power-save type)
    ├── app_uart_init()                  // Initialize UART command port (460800 bps)
    ├── app_uart_set_command_callback()  // Register UART command callback
    ├── app_uart_set_baudrate_change_callback() // Register baud-rate change callback
+   ├── app_power_init()                 // Apply the power-save switch (DFS, light sleep, adv interval) before BLE starts
    ├── app_log_uart_init()              // Initialize log forwarding module
    ├── app_log_uart_set_tx_callback()   // Register log forwarding callback
    ├── app_ble_init()                   // Initialize BLE module
    ├── app_ble_set_rx_callback()        // Register BLE receive callback
-   ├── app_ble_start()                  // Start BLE and begin advertising
+   ├── [If the persisted BLE switch is on]
+   │   └── app_ble_start()              // Start BLE and begin advertising
    ├── [If configured for WIFI_FORWARD mode]
    │   ├── wifi_forward_common_init()   // Initialize WiFi forwarding
    │   ├── Apply DHCP/static IP/hostname/MAC configuration
@@ -229,6 +232,14 @@ NVS is used to persist user configuration. The following namespaces and keys are
 | Key | Type | Description |
 |------|------|------|
 | `timezone` | string | Time zone string (for example, `CST-8`) |
+| `pwr_save` | u8 | Power-save switch (0=off, 1=on; default on) |
+| `ble_en` | u8 | Persisted BLE on/off switch (0=off, 1=on; default on) |
+
+#### Namespace `app_host` (Host (PM5) Opaque Value Slots)
+
+| Key | Type | Description |
+|------|------|------|
+| `h<id>` | u64 | Host value slot 0-255 (`APP_CMD_SET/GET_SYS_HOST_VALUE`); low 32 bits = value, bit 32 = "ever set" flag |
 
 #### Namespace `app_wifi` (WiFi Configuration)
 
@@ -237,6 +248,7 @@ NVS is used to persist user configuration. The following namespaces and keys are
 | `wifi_mode` | i8 | WiFi function mode (0/1/2) |
 | `wifi_fwd_type` | u8 | WiFi forwarding protocol type (0-4) |
 | `wifi_tx_pwr` | i8 | WiFi transmit power (8-80, 0.25 dBm step) |
+| `wifi_ps` | u8 | WiFi modem power-save type (0=none, 1=min modem, 2=max modem; default 1) |
 | `wifi_inact_tm` | u16 | WiFi inactive timeout (seconds) |
 | `wifi_dhcp_en` | u8 | DHCP enable (0/1) |
 | `wifi_mac_addr` | blob(6) | WiFi STA MAC address |
@@ -340,6 +352,8 @@ For a `TYPE_HOST_CMD` command sent by the host, the module returns a `TYPE_SLAVE
 
 ### 4.6 Error Reporting Mechanism
 
+A command code the firmware does not know is answered with a `CMD_ERROR` broadcast carrying `ESP_ERR_NOT_SUPPORTED`, so a host built for a newer protocol fails fast instead of waiting out its timeout.
+
 When command processing fails, the module reports the error through a broadcast packet:
 
 ```
@@ -367,6 +381,37 @@ Baud-rate switching follows a special sequence:
 > **Important**: After the host receives the response to this command, it must immediately switch its own baud rate to match the new rate.
 
 > **Source**: `components/app_uart_cmd/app_cmd_uart.c:440-483` (`app_uart_set_baud_rate`)
+
+### 4.8 Light Sleep and the Wake Preamble
+
+The module uses ESP-IDF automatic light sleep. The command UART can wake it on RX
+edges, but the bytes that carried those edges are lost, so the link follows two rules:
+
+1. **Module side**: any byte sent or received on the command UART takes a
+   no-light-sleep lock; the lock is released 2 s (`UART_LINK_AWAKE_MS`) after the
+   last byte. The module is therefore always awake for the reply to a command and
+   for the host's reply to forwarded data.
+2. **Host side**: before its first frame, and whenever it has not sent anything
+   itself for more than 1 s, it sends a throw-away preamble (four `0x55` bytes, five rising edges
+   each) and waits about 10 ms before the real frame. The parser discards the
+   preamble as noise, so it is harmless to module firmware without light sleep.
+
+The module never drops its no-light-sleep lock until it has seen the preamble (a
+run of >= 3 bytes of `0x55`) at least once since boot. A host that never sends the
+preamble at all (older PM5 firmware, for example) therefore never meets a sleeping
+module: light sleep simply stays off for that link, and no frame is ever lost to it.
+DFS (`CONFIG_PM_ENABLE`) runs independently of this and still applies.
+
+**Command UART clock.** Under DFS the ESP32-C2 switches its PLL off whenever the CPU parks on the crystal (there is no PLL consumer refcount on this chip, unlike C3/C6). The command UART therefore runs from `UART_SCLK_XTAL`, never the default PLL branch: a PLL-clocked UART loses its baud clock between transfers and drops every unsolicited host frame, which looks like a dead module. Keep it that way.
+
+**Power-save switch.** Everything above, DFS and the two-phase advertising
+(section 5.4) hang off one persisted switch, `APP_CMD_SET_SYS_POWER_SAVE`
+(section 9.2). Off, the module pins its CPU at `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ`,
+never light-sleeps and advertises at NimBLE's fast default: the stock behaviour,
+kept for A/B power measurements and for troubleshooting the link. BLE controller
+modem sleep (`CONFIG_BT_LE_SLEEP_ENABLE`) is compile-time and stays on either way.
+
+> **Source**: `components/app_uart_cmd/app_cmd_uart.c` (`link_touch`, `link_idle_cb`, `link_preamble_scan`, `link_sleep_init`), `components/app_power/app_power.c`
 
 ---
 
@@ -415,7 +460,8 @@ The module acts as a BLE Peripheral and runs an SPP (Serial Port Profile) server
 |------|------|
 | Connection Mode | `BLE_GAP_CONN_MODE_UND` (undirected connectable) |
 | Discovery Mode | `BLE_GAP_DISC_MODE_GEN` (general discoverable) |
-| Advertising Duration | Infinite (`BLE_HS_FOREVER`) |
+| Advertising Duration | Infinite (`BLE_HS_FOREVER`); with power save on the fast phase is bounded to `ADV_FAST_DURATION_MS` (30 s), then restarted infinite at the slow interval |
+| Advertising Interval | Power save on (default): NimBLE's fast default (30-60 ms) for 30 s after boot, a disconnect or a power-save toggle, then 1022.5 ms (`ADV_SLOW_ITVL`) until something connects. Power save off: NimBLE's fast default throughout. Changes take effect at once. |
 | Preferred MTU | `CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU` (config item) |
 | Preferred PHY | 2M PHY when both sides support it |
 
@@ -498,6 +544,7 @@ APP_WIFI_DISCONNECTED ──► APP_WIFI_CONNECTING ──► APP_WIFI_CONNECTED
 | BSSID | (empty) | 0 or 6 bytes | Yes (`esp_wifi_set_config`) |
 | Authmode Threshold | `WIFI_AUTH_OPEN` | See `wifi_auth_mode_t` | Yes |
 | Listen Interval | 3 | 1-100 (beacon interval) | Yes |
+| Power-save type | 1 (`WIFI_PS_MIN_MODEM`) | 0=none, 1=min modem, 2=max modem (sleeps for the listen interval) | Yes (NVS `wifi_ps`) |
 | Scan Method | `WIFI_FAST_SCAN` | 0=fast, 1=all-channel | Yes |
 | PMF Mode | 0 (disabled) | 0=disabled, 1=capable, 3=required | Yes |
 | Reconnect Interval | 1 second | 0-65535 seconds (0=connect only once) | Yes |
@@ -587,7 +634,7 @@ Passthrough uses a **bidirectional multi-channel** model:
 2. `tx_data_forward_from_uart()` sends the data to both:
     - **BLE** (always attempted)
     - **WiFi** (only when `wifi_function_mode == WIFI_FORWARD`)
-3. As long as either BLE or WiFi succeeds, the operation is considered successful.
+3. The `TYPE_SLAVE_RESP` for 5000 is sent before step 2, when the frame leaves the UART ring (flow-control credit for the host). A frame no channel accepts is logged and dropped.
 
 #### Wireless -> UART (Downlink)
 
@@ -600,7 +647,7 @@ Passthrough uses a **bidirectional multi-channel** model:
 
 ```
 Host ──► APP_CMD_SEND_FORWARD_DATA (5000) + Payload ──► Module
-Module ──► TYPE_SLAVE_RESP (5000) ──► Host (success acknowledgement)
+Module ──► TYPE_SLAVE_RESP (5000) ──► Host (frame taken out of the UART ring; sent before forwarding)
 ```
 
 > **Important**: `APP_CMD_SEND_FORWARD_DATA` does not specify a target. The data is sent to **all currently active passthrough channels**. To disable or isolate a channel, control it through WiFi mode or BLE start/stop commands.
@@ -618,6 +665,8 @@ When the host receives this broadcast, it means data from a wireless peer has ar
 - **Always running**: BLE is initialized and started in `app_main()`.
 - **Send condition**: BLE must be connected and notifications must be enabled.
 - **Stop**: Can be stopped with `APP_CMD_STOP_BLE_SPP` and restarted with `APP_CMD_START_BLE_SPP`.
+- **Switch**: `APP_CMD_SET_BLE_ENABLE` (4023) is the persisted on/off; with it off the stack is not started at boot. The start/stop pair above is transient (used around OTA) and does not touch the setting: with the switch off, `APP_CMD_START_BLE_SPP` (4021) is acknowledged but does nothing, since hosts send it unconditionally after an OTA.
+- **Security**: with bonding off (the default) any central in range can connect and use the SPP characteristic. With bonding on (`APP_CMD_SET_BLE_BONDING_ENABLE`, persisted) pairing is LE Secure Connections with MITM and the static 6-digit passkey (`APP_CMD_SET_BLE_BONDING_KEY`, default 123456), and the SPP characteristic requires an encrypted link, so an unpaired central can connect but cannot read, write or subscribe. Bonded centrals reconnect without the passkey until removed (`APP_CMD_DEL_BLE_BONDED_DEVICE` / `APP_CMD_CLEAR_BLE_BONDED`). A change of the bonding flag takes effect at the next stack start (stop + start, or reboot).
 
 ### 7.6 WiFi Passthrough Channel
 
@@ -889,6 +938,46 @@ When enabled, ESP_LOGx output is reported through `APP_BROADCAST_SYS_LOG_MESSAGE
 > **Important**: The host should only send other functional commands after the module reports ready.
 
 > **Source**: `main/main.c:614-618`
+
+#### 1019 - APP_CMD_SET_SYS_POWER_SAVE - Set Power-Save Mode
+
+| Direction | Format |
+|------|------|
+| Send | Payload = `uint8_t` (0=off, 1=on) |
+| Response | Payload = `uint8_t` applied state |
+
+Applies at once (no reboot) and is persisted in NVS (`app_sys/pwr_save`). See section 4.8 for what the switch covers.
+
+> **Source**: `main/main.c`, `components/app_power/app_power.c`
+
+#### 1020 - APP_CMD_GET_SYS_POWER_SAVE - Get Power-Save Mode
+
+| Direction | Format |
+|------|------|
+| Send | (no payload) |
+| Response | Payload = `uint8_t` (0=off, 1=on) |
+
+> **Source**: `main/main.c`
+
+#### 1021 - APP_CMD_SET_SYS_HOST_VALUE - Store a Host Setting
+
+| Direction | Format |
+|------|------|
+| Send | Payload = `uint8_t` id + `uint32_t` value (LE) |
+| Response | Payload = `uint32_t` stored value |
+
+A setting of the host (PM5) that has no storage of its own. The module keeps it in NVS (`app_host/h<id>`, a u64 holding the value plus a set flag, so a never-stored slot reads as absent rather than 0) and hands it back; it does not interpret it. The ids are the host's: the PM5 uses 0 for its auto power-off switch, 1 for the idle seconds, and 2 for the unplug switch.
+
+> **Source**: `main/main.c`, `main/main_settings.c`
+
+#### 1022 - APP_CMD_GET_SYS_HOST_VALUE - Read a Host Setting
+
+| Direction | Format |
+|------|------|
+| Send | Payload = `uint8_t` id |
+| Response | Payload = `uint8_t` present (0 = never stored) + `uint32_t` value (LE) |
+
+> **Source**: `main/main.c`
 
 ### 9.3 OTA and Reboot Commands (1800~)
 
@@ -1238,6 +1327,26 @@ Payload structure (PACKED, 11 bytes):
 
 > **Source**: `main/main.c:1533-1549`
 
+#### 2052 - APP_CMD_SET_WIFI_CFG_PS_MODE - Set WiFi Power-Save Type
+
+| Direction | Format |
+|------|------|
+| Send | Payload = `uint8_t` (0=none, 1=min modem, 2=max modem) |
+| Response | Payload = `uint8_t` applied type |
+
+Persisted in NVS (`app_wifi/wifi_ps`). Applied at once when WiFi is running, and re-applied after every `esp_wifi_start()`, which resets the type to the IDF default (min modem). Max modem sleeps for the configured listen interval (2031/2032) and trades latency for current.
+
+> **Source**: `main/main.c`
+
+#### 2053 - APP_CMD_GET_WIFI_CFG_PS_MODE - Get WiFi Power-Save Type
+
+| Direction | Format |
+|------|------|
+| Send | (no payload) |
+| Response | Payload = `uint8_t` (0=none, 1=min modem, 2=max modem) |
+
+> **Source**: `main/main.c`
+
 ### 9.5 Passthrough Command (5000)
 
 #### 5000 - APP_CMD_SEND_FORWARD_DATA - Send Passthrough Data
@@ -1247,7 +1356,7 @@ Payload structure (PACKED, 11 bytes):
 | Send | Payload = data to send (any length <= `MAX_PAYLOAD_LEN`) |
 | Response | (empty payload) |
 
-The data is sent to both BLE and WiFi if WiFi Forward mode is active. Success is returned as long as either path succeeds.
+The response is sent as soon as the frame has been parsed out of the UART ring, before the data goes out over BLE/WiFi: it is a flow-control credit for the host, not a delivery receipt. The data is then sent to BLE and, if WiFi Forward mode is active, to WiFi; a frame no channel accepts is logged and dropped (no `CMD_ERROR`).
 
 > **Source**: `main/main.c:1551-1560`
 
@@ -1439,8 +1548,10 @@ enable(u8/1B) + keep_idle(i32/4B LE) + keep_interval(i32/4B LE) + keep_count(i32
 | 4018 | `SET_BLE_TX_POWER` | 2 bytes: `type(u8)` + `power_level(u8)` |
 | 4019 | `GET_BLE_TX_POWER` | `uint8_t` type -> `uint8_t` power_level |
 | 4020 | `GET_BLE_SPP_STATUS` | (empty) -> `uint8_t` state (0=stopped, 1=started not connected, 2=connected) |
-| 4021 | `START_BLE_SPP` | (empty) |
+| 4021 | `START_BLE_SPP` | (empty). Acknowledged but a no-op while the persisted BLE switch (4023) is off: hosts send it unconditionally after an OTA, and the switch wins. |
 | 4022 | `STOP_BLE_SPP` | (empty) |
+| 4023 | `SET_BLE_ENABLE` | `uint8_t` 0=off 1=on -> `uint8_t` stored state. Persisted (`app_sys/ble_en`, default on); starts or stops the stack at once. Off = radio silent, nothing can connect, the host is reachable over USB/WiFi only. Unlike 4021/4022 it survives a reboot. |
+| 4024 | `GET_BLE_ENABLE` | (empty) -> `uint8_t` 0=off 1=on |
 
 **BLE TX power types**:
 
@@ -1527,6 +1638,23 @@ Payload (6 bytes, PACKED):
 
 ---
 
+### 10.5 APP_BROADCAST_LINK_STATE (8092)
+
+**Wireless client link state**, sent on every change (a client connects to or leaves the BLE SPP service or the WiFi TCP server, or the TCP server is torn down). The module does not repeat it, so a host that boots after the module should query `APP_CMD_GET_BLE_SPP_STATUS` once (2 = connected) for the BLE half. The host uses it to hold off its idle power-off while a client is on.
+
+```
+Payload (2 bytes):
+  ┌──────────────┬──────────────┐
+  │ ble (1 byte) │ wifi (1 byte)│
+  │ uint8_t      │ uint8_t      │
+  └──────────────┴──────────────┘
+```
+
+| Field | Description |
+|------|------|
+| `ble` | 1 = a BLE central is connected, 0 = none |
+| `wifi` | 1 = a client is connected to the TCP server, 0 = none |
+
 ## 11. Configuration Persistence and Recovery
 
 ### 11.1 Configuration Save Mechanism
@@ -1542,14 +1670,17 @@ The module uses ESP-IDF NVS (Non-Volatile Storage) to persist configuration:
 During startup in `app_main()`, `app_nvs_flash_load()` loads configuration in this order:
 
 1. Time zone, then applies it immediately
-2. WiFi function mode, which determines later initialization path
-3. WiFi forwarding type
-4. WiFi TX power
-5. WiFi inactive timeout
-6. DHCP enable state
-7. MAC address (or uses the default eFuse value if not present)
-8. Static IP information
-9. Hostname
+2. Power-save switch (`pwr_save`)
+3. BLE switch (`ble_en`)
+4. WiFi function mode, which determines later initialization path
+5. WiFi forwarding type
+6. WiFi TX power
+7. WiFi power-save type (`wifi_ps`)
+8. WiFi inactive timeout
+9. DHCP enable state
+10. MAC address (or uses the default eFuse value if not present)
+11. Static IP information
+12. Hostname
 
 BLE-related settings are loaded in `app_ble_init()` -> `app_ble_load_persisted_params()`:
 - Bonding enable, pairing key, manufacturer data, device name, device address, notify retry limits, TX power
@@ -1792,17 +1923,17 @@ Send: APP_CMD_SET_TO_WIFI_FORWARD_MODE (2001) + 0x04 (MQTT Client)
 
 | Range | Category | Command Count |
 |--------|------|--------|
-| 1000~1018 | System and general | 19 |
+| 1000~1022 | System and general | 23 |
 | 1800~1803 | OTA and reboot | 4 |
-| 2000~2051 | WiFi mode/configuration/connection | 52 |
+| 2000~2053 | WiFi mode/configuration/connection | 54 |
 | 2200~2214 | TCP Server | 15 |
 | 2300~2314 | TCP Client | 15 |
 | 2400~2412 | UDP Server | 13 |
 | 2500~2512 | UDP Client | 13 |
 | 2600~2655 | MQTT Client | 56 |
-| 4000~4022 | BLE | 23 |
+| 4000~4024 | BLE | 25 |
 | 5000 | Passthrough | 1 |
-| **Total** | | **211** |
+| **Total** | | **219** |
 
 ## Appendix B: Broadcast Type Quick Reference
 
@@ -1812,6 +1943,7 @@ Send: APP_CMD_SET_TO_WIFI_FORWARD_MODE (2001) + 0x04 (MQTT Client)
 | 8089 | `DATA_FORWARD` | Module -> host | Incoming wireless passthrough data |
 | 8090 | `SYS_LOG_MESSAGE` | Module -> host | System log (requires forwarding enabled) |
 | 8091 | `CMD_ERROR` | Module -> host | Command execution failure |
+| 8092 | `LINK_STATE` | Module -> host | BLE / WiFi client connected or gone (on change only) |
 
 ## Appendix C: Error Code Reference
 
