@@ -60,13 +60,17 @@ static esp_err_t set_server_dup(const char *server) {
         return ESP_ERR_NO_MEM;
     }
 
-    // Free the previous string and update the pointer
-    if (s_ctx->server != NULL) {
-        free(s_ctx->server);
+    // Point to the new allocation
+    char *old_server = s_ctx->server;
+    s_ctx->server = new_server;
+
+    // lwIP keeps the pointer, not a copy: repoint it before freeing the old string
+    if (s_ctx->running) {
+        esp_sntp_setservername(0, s_ctx->server);
     }
 
-    // Point to the new allocation
-    s_ctx->server = new_server;
+    // Free the previous string
+    free(old_server);
     return ESP_OK;
 }
 
@@ -201,6 +205,8 @@ esp_err_t app_wifi_sntp_stop(void) {
     }
 
     esp_sntp_stop();
+    // Drop lwIP's pointer to s_ctx->server; synchronous, queued after the stop
+    esp_sntp_setservername(0, NULL);
     s_ctx->running = false;
     ESP_LOGI(TAG, "SNTP stopped");
     return ESP_OK;
