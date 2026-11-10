@@ -881,11 +881,25 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
             if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
                 if (wifi_forward_type != new_wifi_forward_type) {
                     // Deinitialize resources for the current forwarding type
-                    wifi_connect_deinit_additional();
+                    err = wifi_connect_deinit_additional();
+                    if (err != ESP_OK) {
+                        // Old type still (partly) up: don't overwrite its type and leak it
+                        uart_cmd_error_report(cmd, err);
+                        break;
+                    }
                     // Update the forwarding type
                     wifi_forward_type = new_wifi_forward_type;
                     // Initialize resources for the new forwarding type
-                    wifi_connect_init_additional();
+                    err = wifi_connect_init_additional();
+                    if (err != ESP_OK) {
+                        uart_cmd_error_report(cmd, err);
+                        break;
+                    }
+                    // Services are only started on GOT_IP: start them now if already online
+                    uint8_t status = 0;
+                    if (app_wifi_connect_get_status(&status) == ESP_OK && status == 2) {
+                        on_wifi_connect_gotip(false);
+                    }
                 } else {
                     ESP_LOGI(TAG, "Already in WIFI_FUNCTION_MODE_WIFI_FORWARD with the same forward type, no need to reinitialize");
                 }
