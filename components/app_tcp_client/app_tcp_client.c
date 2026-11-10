@@ -294,13 +294,17 @@ static void tcp_client_task(void *pvParameters) {
 
     while (ctx->task_running) {
         if (ctx->client_stop) {
-            if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) != 1) {
-                continue;
-            }
+            // Re-check after waking: start() also notifies when we are not waiting,
+            // so a stale notification can be pending while stopped again
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            continue;
         }
 
         if (tcp_client_connect(ctx)) {
-            tcp_client_data_rx_loop(ctx);
+            // stop() during connect() may have missed the not yet published socket
+            if (!ctx->client_stop) {
+                tcp_client_data_rx_loop(ctx);
+            }
             close_client_socket(ctx);
             
             if (ctx->task_running && !ctx->client_stop) {
