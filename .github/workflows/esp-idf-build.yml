@@ -18,11 +18,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: espressif/idf:release-v5.5
+      image: espressif/idf:v5.5.2
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Allow git in container
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "Firmware version: $(git describe --always --tags --dirty)"
 
       - name: Setup ESP-IDF environment
         shell: bash
