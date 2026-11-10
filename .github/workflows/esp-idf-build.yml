@@ -16,9 +16,19 @@ permissions:
 
 jobs:
   build:
+    name: build (IDF ${{ matrix.idf }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # release assets come from the reference IDF only
+          - idf: v5.5.2
+            release: true
+          - idf: v6.1
+            release: false
     container:
-      image: espressif/idf:v5.5.2
+      image: espressif/idf:${{ matrix.idf }}
 
     steps:
       - name: Checkout
@@ -78,6 +88,10 @@ jobs:
 
           ARTIFACT_PREFIX="proxmark5_bwm_${GITHUB_REF_NAME:-${GITHUB_SHA}}"
           ARTIFACT_PREFIX="${ARTIFACT_PREFIX//\//_}"
+          # artifact names must be unique per run
+          if [ "${{ matrix.release }}" != "true" ]; then
+            ARTIFACT_PREFIX="${ARTIFACT_PREFIX}_idf-${{ matrix.idf }}"
+          fi
 
           MERGED_BIN=""
           if [ -f proxmark5_bwm_allinone.bin ]; then
@@ -125,7 +139,7 @@ jobs:
           if-no-files-found: error
 
       - name: Upload release asset
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' && matrix.release
         uses: softprops/action-gh-release@v3
         with:
           files: |
