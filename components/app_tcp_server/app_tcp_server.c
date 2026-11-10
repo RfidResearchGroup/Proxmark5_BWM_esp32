@@ -50,7 +50,8 @@
 // Default tcp_nodelay configuration
 #define DEFAULT_TCP_NO_DELAY_ENABLE     0  // Default disable TCP_NODELAY, reduce real-time performance for higher throughput
 // Default sndtimeo configuration
-#define DEFAULT_SO_SNDTIMEO_VALUE       -1 // Unit: milliseconds, default: -1, means don't configure this parameter
+#define DEFAULT_SO_SNDTIMEO_VALUE       3000 // Unit: milliseconds, -1 means don't configure this parameter
+                                            // send() runs in the UART task: never block it indefinitely
 // Default IPv4 configuration
 #define DEFAULT_IP_MODE                 0 // 0: IPv4, 1: IPv6
 
@@ -634,7 +635,8 @@ esp_err_t app_tcp_server_send(uint8_t *data, size_t length) {
         int written = send(s_ctx->socket_client_handle, data + (length - to_write), to_write, 0);
         if (written < 0) {
             ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-            // Failed to retransmit, giving up
+            // Drop the client: after a partial write the stream would continue out of frame
+            close_client_socket(s_ctx);
             return ESP_FAIL;
         }
         to_write -= written;

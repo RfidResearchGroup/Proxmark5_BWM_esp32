@@ -523,6 +523,9 @@ esp_err_t app_tcp_client_send(uint8_t *data, size_t length) {
         int written = send(s_ctx->socket_handle, data + (length - to_write), to_write, 0);
         if (written < 0) {
             ESP_LOGE(TAG, "Send error: errno %d", errno);
+            // Drop the link: after a partial write the stream would continue out of frame;
+            // the task reconnects
+            close_client_socket(s_ctx);
             return ESP_FAIL;
         }
         to_write -= written;
