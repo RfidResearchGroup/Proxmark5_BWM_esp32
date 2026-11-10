@@ -450,9 +450,10 @@ static void tcp_server_task(void *pvParameters) {
     }
 
     // If outer loop exits too, means user called deinit
-    ctx->task_handle = NULL;
     ctx->task_running = false;
     ctx->server_stop = true;
+    // Last ctx access: deinit frees ctx once it sees the handle cleared
+    ctx->task_handle = NULL;
     vTaskDelete(NULL);
 }
 

@@ -260,9 +260,10 @@ static void udp_client_task(void *pvParameters) {
     }
 
     // Task exit cleanup
-    ctx->task_handle = NULL;
     ctx->task_running = false;
     ctx->client_stop = true;
+    // Last ctx access: deinit frees ctx once it sees the handle cleared
+    ctx->task_handle = NULL;
     vTaskDelete(NULL);
 }
 

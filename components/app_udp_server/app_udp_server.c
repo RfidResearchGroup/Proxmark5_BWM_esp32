@@ -275,9 +275,10 @@ static void udp_server_task(void *pvParameters) {
         close_server_socket(ctx);
     }
 
-    ctx->task_handle = NULL;
     ctx->task_running = false;
     ctx->server_stop = true;
+    // Last ctx access: deinit frees ctx once it sees the handle cleared
+    ctx->task_handle = NULL;
     vTaskDelete(NULL);
 }
 
