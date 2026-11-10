@@ -1058,6 +1058,10 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         }
 
         case APP_CMD_SET_WIFI_CFG_COUNTRY: {
+            if (length != sizeof(wifi_country_payload_t)) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
             wifi_country_payload_t *payload = (wifi_country_payload_t*)p_data;
             // Update WiFi country configuration
             wifi_country.policy = payload->country_policy;
@@ -1369,6 +1373,11 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
 
         case APP_CMD_SET_WIFI_CONNECT_CFG_SSID: {
             esp_err_t err;
+            // The setter takes a uint8_t length: reject what would be truncated
+            if (length > UINT8_MAX) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
             if (length == 0) {
                 // Pass NULL to reset SSID (clears the SSID filter)
                 err = app_wifi_connect_set_ssid(NULL, 0); // Persisted via esp_wifi_set_config
@@ -1399,6 +1408,11 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
 
         case APP_CMD_SET_WIFI_CONNECT_CFG_PASSWORD: {
             esp_err_t err;
+            // The setter takes a uint8_t length: reject what would be truncated
+            if (length > UINT8_MAX) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
             
             if (length == 0) {
                 // Pass NULL to reset password (clears the password)
@@ -1430,6 +1444,11 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
 
         case APP_CMD_SET_WIFI_CONNECT_CFG_BSSID: {
             esp_err_t err;
+            // The setter takes a uint8_t length: reject what would be truncated
+            if (length > UINT8_MAX) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
             if (length == 0) {
                 // Reset BSSID (clear MAC filter)
                 err = app_wifi_connect_set_bssid(NULL, 0); // Persisted via esp_wifi_set_config
@@ -1593,7 +1612,11 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
                 break;
             }
-            app_wifi_sntp_set_enable(p_data[0]); // Persisted internally by the module
+            esp_err_t err = app_wifi_sntp_set_enable(p_data[0]); // Persisted internally by the module
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
             app_uart_send_response(cmd, NULL, 0);
             break;
         }
@@ -1610,7 +1633,11 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
                 break;
             }
-            app_wifi_sntp_set_server((const char *)p_data); // Persisted internally by the module
+            esp_err_t err = app_wifi_sntp_set_server((const char *)p_data); // Persisted internally by the module
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
             app_uart_send_response(cmd, NULL, 0);
             break;
         }
@@ -1629,7 +1656,11 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 break;
             }
             uint32_t interval = P2V(uint32_t, p_data); // Persisted internally by the module
-            app_wifi_sntp_set_interval(interval);
+            esp_err_t err = app_wifi_sntp_set_interval(interval);
+            if (err != ESP_OK) {
+                uart_cmd_error_report(cmd, err);
+                break;
+            }
             app_uart_send_response(cmd, NULL, 0);
             break;
         }
