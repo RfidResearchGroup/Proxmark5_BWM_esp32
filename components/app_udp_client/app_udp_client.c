@@ -308,6 +308,8 @@ esp_err_t app_udp_client_init(void) {
         ESP_LOGI(TAG, "Loaded UDP Client target server IP from NVS: %s", server_ip);
         err = get_sockaddr_storage_from_string(server_ip, server_port, &s_ctx->server_addr_target, NULL);
         free(server_ip); // Release string memory allocated by NVS library
+        // Persisted target is as valid as one set at runtime
+        s_ctx->is_target_set = (err == ESP_OK);
     }
     if (err != ESP_OK) {
         app_udp_client_ctx_destroy(s_ctx);
