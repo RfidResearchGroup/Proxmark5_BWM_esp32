@@ -50,7 +50,15 @@ esp_err_t app_wifi_cfg_set_ipv4(uint32_t ipaddr, uint32_t gwaddr, uint32_t netma
     info_t.gw.addr = gwaddr;
     info_t.netmask.addr = netmask;
     // Call lower layer interface to set
-    return esp_netif_set_ip_info(sta_netif, &info_t);
+    esp_err_t err = esp_netif_set_ip_info(sta_netif, &info_t);
+    if (err != ESP_OK || gwaddr == 0) {
+        return err;
+    }
+    // No DHCP means no DNS server: use the gateway, as most routers forward DNS
+    esp_netif_dns_info_t dns = { 0x00 };
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = gwaddr;
+    return esp_netif_set_dns_info(sta_netif, ESP_NETIF_DNS_MAIN, &dns);
 }
 
 /**
