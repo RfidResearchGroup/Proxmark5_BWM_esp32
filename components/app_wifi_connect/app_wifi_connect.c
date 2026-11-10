@@ -23,6 +23,10 @@
 
 // Default reconnect interval, in seconds, 1 second
 #define WIFI_RECONNECT_INTERVAL_DEFAULT     (1)
+// Connect task exit wait on stop. Must exceed the esp-mqtt network timeout (10 s):
+// the disconnect callback may be inside app_mqtt_stop(), and a force-delete there
+// leaves the MQTT locks held and deadlocks the next start.
+#define WIFI_CONNECT_TASK_EXIT_TIMEOUT_MS   (12000)
 
 // Define standard max length, consistent with array size
 #define WIFI_SSID_MAX_LEN       sizeof(((wifi_config_t *)0)->sta.ssid)
@@ -523,7 +527,7 @@ esp_err_t app_wifi_connect_stop(void) {
         // Stop WiFi protocol stack
         esp_wifi_stop();
         // Wait for connection task to completely exit
-        wait_for_rtos_task_exit(2000, &s_ctx->connect_task_handle);
+        wait_for_rtos_task_exit(WIFI_CONNECT_TASK_EXIT_TIMEOUT_MS, &s_ctx->connect_task_handle);
         ESP_LOGI(TAG, "WIFI connect task stoped");
     }
     return ESP_OK;

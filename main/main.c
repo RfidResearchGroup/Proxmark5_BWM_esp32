@@ -452,6 +452,8 @@ static esp_err_t wifi_forward_common_init(void) {
  * @brief Tears down WiFi forward mode; safe on a partially initialised one.
  */
 static void wifi_forward_common_deinit(void) {
+    // Stop the connect task first: its callbacks use MQTT/SNTP/transports freed below
+    app_wifi_connect_stop();
     wifi_connect_deinit_additional();
     app_wifi_mdns_stop();
     app_wifi_connect_deinit();
