@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include "freertos/FreeRTOS.h"
 #include "app_log_uart.h"
 
 
@@ -10,6 +11,8 @@ typedef struct {
 } app_log_uart_ctx_t;
 
 static app_log_uart_ctx_t *s_ctx = NULL;
+// Guards logging_in_progress / log_buffer / log_uart_started across logging tasks and stop
+static portMUX_TYPE s_log_mux = portMUX_INITIALIZER_UNLOCKED;
 
 
 /**
@@ -21,15 +24,25 @@ static app_log_uart_ctx_t *s_ctx = NULL;
  * @return int Number of output characters
  */
 static int custom_vprintf(const char *fmt, va_list args) {
-    // Prevent recursive calls and check if log forwarding started; if not, call original vprintf to output logs
-    if (s_ctx == NULL || s_ctx->logging_in_progress || !s_ctx->log_uart_started) {
-        // If already printing and lower layer triggers log, discard to avoid infinite loop
-        return vprintf(fmt, args); // Directly call original vprintf to output logs, print logs on default terminal, at least there's a backup output, avoid completely losing logs
+    // Claim the buffer atomically: concurrent loggers and recursive logs fall back to plain vprintf
+    bool forward = false;
+    if (s_ctx != NULL) {
+        portENTER_CRITICAL(&s_log_mux);
+        if (s_ctx->log_uart_started && !s_ctx->logging_in_progress && s_ctx->log_buffer != NULL) {
+            s_ctx->logging_in_progress = true;
+            forward = true;
+        }
+        portEXIT_CRITICAL(&s_log_mux);
     }
-    // Set flag to indicate currently outputting logs
-    s_ctx->logging_in_progress = true;
-    // Format string
-    int len = vsnprintf(s_ctx->log_buffer, CONFIG_CMD_PAYLOAD_SIZE, fmt, args);
+    if (forward == false) {
+        return vprintf(fmt, args);
+    }
+
+    // Format string; args is used again below, so format from a copy
+    va_list fwd_args;
+    va_copy(fwd_args, args);
+    int len = vsnprintf(s_ctx->log_buffer, CONFIG_CMD_PAYLOAD_SIZE, fmt, fwd_args);
+    va_end(fwd_args);
     if (len > 0) {
         // Limit length to not exceed buffer
         if (len >= CONFIG_CMD_PAYLOAD_SIZE) {
@@ -40,8 +53,18 @@ static int custom_vprintf(const char *fmt, va_list args) {
             s_ctx->tx_callback((uint8_t*)s_ctx->log_buffer, len);
         }
     }
-    // Finally clear flag
+
+    // Release the claim; free the buffer here if stop() ran meanwhile
+    char *release = NULL;
+    portENTER_CRITICAL(&s_log_mux);
     s_ctx->logging_in_progress = false;
+    if (s_ctx->log_uart_started == false) {
+        release = s_ctx->log_buffer;
+        s_ctx->log_buffer = NULL;
+    }
+    portEXIT_CRITICAL(&s_log_mux);
+    free(release);
+
     return vprintf(fmt, args); // Continue calling original vprintf to output logs to default terminal as backup, avoid losing logs completely
 }
 
@@ -109,12 +132,20 @@ esp_err_t app_log_uart_start(void) {
     }
 
     // Allocate log_buffer at startup
-    s_ctx->log_buffer = malloc(CONFIG_CMD_PAYLOAD_SIZE);
-    if (s_ctx->log_buffer == NULL) {
+    char *buf = malloc(CONFIG_CMD_PAYLOAD_SIZE);
+    if (buf == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
+    portENTER_CRITICAL(&s_log_mux);
+    // A logger may still hold the buffer from before the last stop: keep that one
+    if (s_ctx->log_buffer == NULL) {
+        s_ctx->log_buffer = buf;
+        buf = NULL;
+    }
     s_ctx->log_uart_started = true;
+    portEXIT_CRITICAL(&s_log_mux);
+    free(buf);
     return ESP_OK;
 }
 
@@ -128,13 +159,16 @@ esp_err_t app_log_uart_stop(void) {
         return ESP_OK;
     }
 
+    // Free log_buffer at stop, unless a logger is using it: it then frees it when done
+    char *release = NULL;
+    portENTER_CRITICAL(&s_log_mux);
     s_ctx->log_uart_started = false;
-
-    // Free log_buffer at stop
-    if (s_ctx->log_buffer != NULL) {
-        free(s_ctx->log_buffer);
+    if (s_ctx->logging_in_progress == false) {
+        release = s_ctx->log_buffer;
         s_ctx->log_buffer = NULL;
     }
+    portEXIT_CRITICAL(&s_log_mux);
+    free(release);
 
     return ESP_OK;
 }
