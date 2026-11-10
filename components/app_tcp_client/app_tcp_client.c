@@ -9,6 +9,7 @@
 #include "app_tcp_client.h"
 #include "app_netutils.h"
 #include "app_nvs_rw.h"
+#include "app_rtos_task.h"
 
 
 #define NAMESPACE_TCP_CLIENT           "app_tcp_client"
@@ -309,18 +310,20 @@ static void tcp_client_task(void *pvParameters) {
             
             if (ctx->task_running && !ctx->client_stop) {
                 ESP_LOGW(TAG, "Connection lost. Reconnecting in %d ms...", RECONNECT_DELAY_MS);
-                vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+                // Interruptible delay: deinit notifies, so it needn't wait it out
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(RECONNECT_DELAY_MS));
             }
         } else {
             if (ctx->task_running && !ctx->client_stop) {
-                vTaskDelay(pdMS_TO_TICKS(RECONNECT_DELAY_MS));
+                ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(RECONNECT_DELAY_MS));
             }
         }
     }
 
     close_client_socket(ctx);
-    ctx->task_handle = NULL;
     ctx->task_running = false;
+    // Last ctx access: deinit frees ctx once it sees the handle cleared
+    ctx->task_handle = NULL;
     vTaskDelete(NULL);
 }
 
@@ -443,10 +446,9 @@ esp_err_t app_tcp_client_deinit(void) {
 
             close_client_socket(s_ctx);
 
-            int count = 0;
-            while(s_ctx->task_handle != NULL && count < 20) {
-                vTaskDelay(pdMS_TO_TICKS(100));
-                count++;
+            // Never free ctx under a live task: force-deletes it on timeout
+            if (s_ctx->task_handle != NULL) {
+                wait_for_rtos_task_exit(2000, &s_ctx->task_handle);
             }
         }
 
