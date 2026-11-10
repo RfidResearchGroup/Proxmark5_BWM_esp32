@@ -23,6 +23,9 @@
 
 // Default reconnect interval, in seconds, 1 second
 #define WIFI_RECONNECT_INTERVAL_DEFAULT     (1)
+// Back-off between failed connect attempts (AP gone, wrong password), doubling up to the max
+#define WIFI_CONNECT_RETRY_MIN_MS           (1000)
+#define WIFI_CONNECT_RETRY_MAX_MS           (30000)
 // Connect task exit wait on stop. Must exceed the esp-mqtt network timeout (10 s):
 // the disconnect callback may be inside app_mqtt_stop(), and a force-delete there
 // leaves the MQTT locks held and deadlocks the next start.
@@ -180,6 +183,7 @@ static void wifi_connect_task(void *pvParameters) {
         return;
     }
     esp_err_t err;
+    uint32_t retry_ms = WIFI_CONNECT_RETRY_MIN_MS;
 
     // Before starting WiFi connection task, reset connection state to disconnected
     s_ctx->wifi_connect_state = APP_WIFI_DISCONNECTED;
@@ -220,6 +224,7 @@ static void wifi_connect_task(void *pvParameters) {
                     // State machine transitions to connected state
                     s_ctx->wifi_connect_state = APP_WIFI_CONNECTED;
                     ESP_LOGI(TAG, "APP_WIFI_CONNECTING -> APP_WIFI_CONNECTED");
+                    retry_ms = WIFI_CONNECT_RETRY_MIN_MS;
                 }
                 if (bits & WIFI_DISCONNECTED_BIT) {
                     // In any case, state machine must transition back to APP_WIFI_DISCONNECTED to re-initiate connection
@@ -227,6 +232,21 @@ static void wifi_connect_task(void *pvParameters) {
                     // reconnect_interval controls reconnection interval after being normally connected and then disconnected
                     s_ctx->wifi_connect_state = APP_WIFI_DISCONNECTED;
                     ESP_LOGI(TAG, "APP_WIFI_CONNECTING -> APP_WIFI_DISCONNECTED");
+                    // Failed attempt: back off, retrying at once keeps the radio scanning nonstop
+                    if ((bits & (WIFI_CONNECTED_BIT | WIFI_CONNECT_STOP_BIT)) == 0) {
+                        ESP_LOGI(TAG, "Connect failed, retrying in %lu ms", (unsigned long)retry_ms);
+                        EventBits_t sbits = xEventGroupWaitBits(
+                            s_ctx->wifi_event_group,
+                            WIFI_CONNECT_STOP_BIT,
+                            pdTRUE,
+                            pdFALSE,
+                            pdMS_TO_TICKS(retry_ms)
+                        );
+                        if (sbits & WIFI_CONNECT_STOP_BIT) {
+                            bits |= WIFI_CONNECT_STOP_BIT; // handled just below
+                        }
+                        retry_ms = (retry_ms * 2 > WIFI_CONNECT_RETRY_MAX_MS) ? WIFI_CONNECT_RETRY_MAX_MS : retry_ms * 2;
+                    }
                 }
                 if (bits & WIFI_CONNECT_STOP_BIT) {
                     s_ctx->wifi_connect_state = APP_WIFI_CONNECT_STOP; // Received stop connection event, need to exit connection task
