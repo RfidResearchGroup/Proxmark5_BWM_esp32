@@ -1,9 +1,9 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "driver/uart.h"
-#include "esp_rom_uart.h"
 #include "app_cmd_uart.h"
 #if CONFIG_PM_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE
+#include "driver/uart_wakeup.h"
 #include "esp_pm.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
@@ -88,7 +88,11 @@ static esp_err_t link_sleep_init(void) {
     if (err != ESP_OK) {
         return err;
     }
-    err = uart_set_wakeup_threshold(UART_SPP_NUM, UART_LINK_WAKEUP_EDGES);
+    const uart_wakeup_cfg_t wcfg = {
+        .wakeup_mode = UART_WK_MODE_ACTIVE_THRESH,
+        .rx_edge_threshold = UART_LINK_WAKEUP_EDGES,
+    };
+    err = uart_wakeup_setup(UART_SPP_NUM, &wcfg);
     if (err != ESP_OK) {
         return err;
     }

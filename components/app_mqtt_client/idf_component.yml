@@ -1,0 +1,6 @@
+dependencies:
+  # mqtt left ESP-IDF in v6.0; older IDF still ships it built in
+  espressif/mqtt:
+    version: "*"
+    rules:
+      - if: "idf_version >=6.0"
