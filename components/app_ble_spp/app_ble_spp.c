@@ -399,6 +399,8 @@ static void app_ble_apply_sm_cfg(uint8_t bonding) {
     ble_hs_cfg.sm_bonding = bonding;
     ble_hs_cfg.sm_mitm = bonding ? 1 : 0;
     ble_hs_cfg.sm_sc = bonding ? 1 : 0;
+    // Refuse legacy pairing: its passkey exchange can be brute-forced from a sniffed trace
+    ble_hs_cfg.sm_sc_only = bonding ? 1 : 0;
     // sm_sec_lvl=1 means "security not supported": NimBLE immediately replies with
     // Pairing Failed (Command Not Supported) when it receives a Pairing Request,
     // rejecting before sending a Pairing Response — the phone never sees a response
@@ -1108,17 +1110,18 @@ esp_err_t app_ble_start(void) {
         // s_ctx->spp_chr_val_handle, allowing us to reference it later when sending data.
         s_ble_spp_chr_defs[0].val_handle = &s_ctx->spp_chr_val_handle;
         s_ble_bas_chr_defs[0].val_handle = &s_ctx->battery_chr_val_handle;
-        // Each start resets to default permissions, then adds encryption flags if bonding is enabled
+        // Each start resets to default permissions, then adds authentication flags if bonding is enabled
         s_ble_spp_chr_defs[0].flags =
             BLE_GATT_CHR_F_READ |
             BLE_GATT_CHR_F_NOTIFY |
             BLE_GATT_CHR_F_WRITE_NO_RSP |
             BLE_GATT_CHR_F_WRITE;
         if (s_ctx->bonding) {
+            // AUTHEN, not ENC: ENC also accepts a Just Works link paired without the passkey
             s_ble_spp_chr_defs[0].flags |=
-                (BLE_GATT_CHR_F_READ_ENC |
-                BLE_GATT_CHR_F_NOTIFY_INDICATE_ENC |
-                BLE_GATT_CHR_F_WRITE_ENC);
+                (BLE_GATT_CHR_F_READ_AUTHEN |
+                BLE_GATT_CHR_F_NOTIFY_INDICATE_AUTHEN |
+                BLE_GATT_CHR_F_WRITE_AUTHEN);
         }
 
         int rc = gatt_svr_init();
@@ -1615,9 +1618,10 @@ esp_err_t app_ble_set_bonding_enable(uint8_t enable) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    const uint8_t old_bonding = s_ctx->bonding;
     s_ctx->bonding = enable ? 1 : 0;
     uint8_t persisted_enable = s_ctx->bonding;
-    return app_nvs_rw_write(NAMESPACE_BLE_SPP, (app_nvs_rw_write_item_t[]) {
+    esp_err_t err = app_nvs_rw_write(NAMESPACE_BLE_SPP, (app_nvs_rw_write_item_t[]) {
         {
             .key = KEY_BLE_BONDING_ENABLE,
             .type = APP_NVS_RW_TYPE_U8,
@@ -1625,6 +1629,18 @@ esp_err_t app_ble_set_bonding_enable(uint8_t enable) {
             .length = sizeof(persisted_enable),
         }
     }, 1);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    // SM config and characteristic flags are only applied at start: restart a running stack
+    if (s_ctx->bonding != old_bonding && s_ctx->state != APP_BLE_STATE_CTX_READY) {
+        err = app_ble_stop();
+        if (err == ESP_OK) {
+            err = app_ble_start();
+        }
+    }
+    return err;
 }
 
 /**
