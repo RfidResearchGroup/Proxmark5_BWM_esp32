@@ -449,6 +449,41 @@ static esp_err_t wifi_forward_common_init(void) {
 }
 
 /**
+ * @brief Tears down WiFi forward mode; safe on a partially initialised one.
+ */
+static void wifi_forward_common_deinit(void) {
+    wifi_connect_deinit_additional();
+    app_wifi_mdns_stop();
+    app_wifi_connect_deinit();
+}
+
+// Saved settings the driver loses on (re)init. Boot and the runtime
+// FORWARD / START_WIFI_CONNECT_TASK path must both apply them.
+
+/**
+ * @brief Applies saved settings that must be set before esp_wifi_start().
+ */
+static void wifi_apply_saved_pre_start(void) {
+    // On power-up DHCP is enabled by default; only disable it when explicitly required
+    if (false == wifi_dhcp_enable) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_dhcp_enable(false));
+        // Static IP is only effective when DHCP is disabled; apply only in that case
+        ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_ipv4(wifi_ip_info[0], wifi_ip_info[1], wifi_ip_info[2]));
+    }
+    ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_host_name(wifi_host_name));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mac(WIFI_IF_STA, wifi_sta_mac));
+}
+
+/**
+ * @brief Applies saved settings that need a started driver (after esp_wifi_start()).
+ */
+static void wifi_apply_saved_post_start(void) {
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_max_tx_power(wifi_tx_power));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_apply_ps_mode());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_inactive_time(WIFI_IF_STA, wifi_inactive_time));
+}
+
+/**
  * @brief Reports a UART command processing error by broadcasting the error information
  * to the host. The host can use this to detect that command processing failed, identify
  * which command failed, and determine the error code.
@@ -792,9 +827,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
 
         case APP_CMD_SET_TO_WIFI_DISABLE_MODE: {
             if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
-                wifi_connect_deinit_additional();
-                app_wifi_mdns_stop();
-                app_wifi_connect_deinit();
+                wifi_forward_common_deinit();
             } else if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_SCANNER) {
                 app_wifi_scanner_deinit();
             }
@@ -856,11 +889,20 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 }
             } else {
                 // Not currently in WiFi forward mode; initialize it now
-                g_wifi_function_mode = WIFI_FUNCTION_MODE_WIFI_FORWARD;
                 wifi_forward_type = new_wifi_forward_type;
                 // Initialize WiFi forward mode via the shared init helper
-                wifi_forward_common_init();
-                (void)wifi_apply_ps_mode();
+                err = wifi_forward_common_init();
+                if (err != ESP_OK) {
+                    // Stay out of forward mode, so the next FORWARD retries instead
+                    // of answering "already in forward mode" with nothing behind it
+                    ESP_LOGE(TAG, "WiFi forward init failed: %s", esp_err_to_name(err));
+                    wifi_forward_common_deinit();
+                    g_wifi_function_mode = WIFI_FUNCTION_MODE_WIFI_DISABLE;
+                    uart_cmd_error_report(cmd, err);
+                    break;
+                }
+                g_wifi_function_mode = WIFI_FUNCTION_MODE_WIFI_FORWARD;
+                wifi_apply_saved_pre_start();
             }
 
             ESP_LOGI(TAG, "Free Heap(after WIFI_FUNCTION_MODE_WIFI_FORWARD): %ld", esp_get_free_heap_size());
@@ -1630,7 +1672,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 uart_cmd_error_report(cmd, err);
                 break;
             }
-            (void)wifi_apply_ps_mode();
+            wifi_apply_saved_post_start();
             app_uart_send_response(cmd, NULL, 0);
             break;
         }
@@ -3766,19 +3808,10 @@ void app_main(void) {
     // Initialize the WiFi forwarding module based on the stored configuration
     if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_forward_common_init());
-        // On power-up DHCP is enabled by default; only disable it when explicitly required
-        // (must be done before starting the connection)
-        if (false == wifi_dhcp_enable) {
-            ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_dhcp_enable(false));
-            // Static IP is only effective when DHCP is disabled; apply only in that case
-            ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_ipv4(wifi_ip_info[0], wifi_ip_info[1], wifi_ip_info[2]));
-        }
-        ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_cfg_set_host_name(wifi_host_name));
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_mac(WIFI_IF_STA, wifi_sta_mac));
+        // Same settings and order as the runtime FORWARD + START_WIFI_CONNECT_TASK path
+        wifi_apply_saved_pre_start();
         ESP_ERROR_CHECK_WITHOUT_ABORT(app_wifi_connect_start());
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_max_tx_power(wifi_tx_power));
-        ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_apply_ps_mode());
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_inactive_time(WIFI_IF_STA, wifi_inactive_time));
+        wifi_apply_saved_post_start();
     }
 
     // Mark system as ready; safe to receive and process commands from this point
