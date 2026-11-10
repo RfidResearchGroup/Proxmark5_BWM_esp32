@@ -672,10 +672,20 @@ esp_err_t app_mqtt_stop(void) {
  */
 esp_err_t app_mqtt_send(uint8_t *data, size_t length) {
     // To send MQTT messages, client must be initialized and publish topic must be configured
-    if (s_mqtt_ctx == NULL || s_mqtt_ctx->client == NULL) {
+    if (s_mqtt_ctx == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    // app_mqtt_stop() destroys the client under this mutex (e.g. on WiFi drop).
+    // Short wait: called from the UART task, and data sent while stopping is lost anyway.
+    if (xSemaphoreTake(s_mqtt_ctx->mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (s_mqtt_ctx->client == NULL) {
+        xSemaphoreGive(s_mqtt_ctx->mutex);
         return ESP_ERR_INVALID_STATE;
     }
     if (s_mqtt_ctx->publish_topic == NULL) {
+        xSemaphoreGive(s_mqtt_ctx->mutex);
         return ESP_ERR_INVALID_ARG; // No publish topic configured
     }
     // Publish via esp_mqtt_client_publish; this wrapper publishes to a single configured topic
@@ -687,6 +697,7 @@ esp_err_t app_mqtt_send(uint8_t *data, size_t length) {
         s_mqtt_ctx->publish_qos,    // QoS level
         s_mqtt_ctx->publish_retain  // Retain flag
     );
+    xSemaphoreGive(s_mqtt_ctx->mutex);
     if (msg_id < 0) {
         return ESP_FAIL; // Publish failed (e.g., disconnected client, memory pressure)
     }
