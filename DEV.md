@@ -765,7 +765,7 @@ Host                              Module
 | Direction | Format |
 |------|------|
 | Send | (no payload) |
-| Response | Payload = `uint32_t` free_heap_size (LE) |
+| Response | Payload = `uint32_t[3]` (LE): free heap, lowest free heap since boot, largest free block. Firmware up to V2 sends only the first. |
 
 > **Source**: `main/main.c:436-439`
 

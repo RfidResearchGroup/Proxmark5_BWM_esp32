@@ -9,9 +9,9 @@ CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_BROADCASTER=n
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_MAX_BONDS=5
+CONFIG_BT_NIMBLE_MAX_BONDS=1
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
-CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256
 CONFIG_BT_NIMBLE_LOG_LEVEL_NONE=y
 CONFIG_BT_RELEASE_IRAM=y
 CONFIG_ESP_TLS_PSK_VERIFICATION=y
@@ -62,10 +62,22 @@ CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 # the lock and powers the BT PHY down between advertising / connection events.
 # LP clock is the main crystal (default): the module has no 32.768 kHz crystal.
 CONFIG_BT_LE_SLEEP_ENABLE=y
-# Sleep entry/exit and the RTOS idle path run from IRAM, so each light sleep
-# starts a little sooner and lasts a little longer. NOT ESP_SLEEP_POWER_DOWN_FLASH:
+# Sleep entry/exit and the RTOS idle path stay in flash: in IRAM they cost ~4.8 KB
+# of the heap WiFi + BLE need. NOT ESP_SLEEP_POWER_DOWN_FLASH:
 # in IDF 5.5 that powers the flash down on any sleep longer than a few ms even
 # with the UART and BT wake sources armed, and a wake during the power-down
 # window can fault the flash (see "Power-down of Flash" in the IDF sleep docs).
-CONFIG_PM_SLP_IRAM_OPT=y
-CONFIG_PM_RTOS_IDLE_OPT=y
+CONFIG_PM_SLEEP_FUNC_IN_IRAM=n
+CONFIG_PM_SLP_IRAM_OPT=n
+CONFIG_PM_RTOS_IDLE_OPT=n
+# --- Internal RAM ---------------------------------------------------------------
+# Heap is what WiFi RX buffers come from: run it low and inbound frames are
+# dropped while the STA still reports connected (issue #10).
+# Flash driver from ROM, ~10 KB of IRAM back. GD chip support stays on.
+CONFIG_SPI_FLASH_ROM_IMPL=y
+# Ring buffer code in flash (IDF 5.x; 6.x default), ISR parts stay in IRAM.
+CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
+# One link, one bond.
+CONFIG_BT_NIMBLE_MAX_CCCDS=1
+CONFIG_BT_NIMBLE_GATT_MAX_PROCS=3
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=15

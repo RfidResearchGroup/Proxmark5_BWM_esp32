@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_app_desc.h"
 #include "nvs_flash.h"
 #include "app_cmd_uart.h"
@@ -527,8 +528,13 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         }
 
         case APP_CMD_GET_SYS_FREE_HEAP: {
-            uint32_t free_heap = (uint32_t)esp_get_free_heap_size();
-            app_uart_send_response(cmd, (uint8_t *)&free_heap, sizeof(free_heap));
+            // {free, lowest free since boot, largest free block}; older hosts read only the first
+            uint32_t heap[3] = {
+                (uint32_t)esp_get_free_heap_size(),
+                (uint32_t)esp_get_minimum_free_heap_size(),
+                (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+            };
+            app_uart_send_response(cmd, (uint8_t *)heap, sizeof(heap));
             break;
         }
 
