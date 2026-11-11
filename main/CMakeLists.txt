@@ -26,6 +26,7 @@ set(components
     app_wifi_mdns
     spi_flash
     efuse
+    esp_timer
 )
 
 # Register component

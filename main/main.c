@@ -10,6 +10,7 @@
 #include "esp_chip_info.h"
 #include "esp_flash.h"
 #include "esp_efuse.h"
+#include "esp_timer.h"
 #include "esp_app_desc.h"
 #include "nvs_flash.h"
 #include "app_cmd_uart.h"
@@ -83,6 +84,32 @@ static bool system_ready = false;
 // WiFi functional mode; defaults to disabled. May switch to WIFI_FORWARD mode after
 // loading config on boot (SCAN mode can only be started at runtime).
 static wifi_function_mode_t g_wifi_function_mode = WIFI_FUNCTION_MODE_WIFI_DISABLE;
+
+// OTA runs at full clock: released at OTA_END, or after this long without a
+// write (an aborted host never says so).
+#define OTA_POWER_HOLD_IDLE_US  (30 * 1000 * 1000)
+static esp_timer_handle_t s_ota_hold_timer = NULL;
+
+static void ota_hold_expired(void *arg) {
+    (void)arg;
+    app_power_hold_full_speed(false);
+}
+
+static void ota_power_hold(bool hold) {
+    if (s_ota_hold_timer == NULL) {
+        const esp_timer_create_args_t args = { .callback = ota_hold_expired, .name = "ota_hold" };
+        if (esp_timer_create(&args, &s_ota_hold_timer) != ESP_OK) {
+            s_ota_hold_timer = NULL;
+        }
+    }
+    if (s_ota_hold_timer) {
+        (void)esp_timer_stop(s_ota_hold_timer);
+    }
+    app_power_hold_full_speed(hold);
+    if (hold && s_ota_hold_timer) {
+        (void)esp_timer_start_once(s_ota_hold_timer, OTA_POWER_HOLD_IDLE_US);
+    }
+}
 // Power-save switch as loaded from NVS for app_power_init(); the live state is
 // app_power_get_enabled(). Default on.
 static uint8_t power_save_boot = 1;
@@ -821,12 +848,15 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 break;
             }
             uint32_t firmware_size = P2V(uint32_t, p_data);
+            ota_power_hold(true);
             esp_err_t err = app_ota_begin(firmware_size);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to begin OTA: %s", esp_err_to_name(err));
+                ota_power_hold(false);
                 uart_cmd_error_report(cmd, err);
                 break;
             }
+            ota_power_hold(true);   // restart the idle timeout after the erase
             app_uart_send_response(cmd, NULL, 0);
             break;
         }
@@ -836,6 +866,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 uart_cmd_error_report(cmd, ESP_ERR_INVALID_SIZE);
                 break;
             }
+            ota_power_hold(true);
             esp_err_t err = app_ota_write(p_data, length);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to write OTA chunk: %s", esp_err_to_name(err));
@@ -848,6 +879,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
 
         case APP_CMD_OTA_END: {
             esp_err_t err = app_ota_end();
+            ota_power_hold(false);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to finish OTA: %s", esp_err_to_name(err));
                 uart_cmd_error_report(cmd, err);

@@ -30,4 +30,9 @@ esp_err_t app_power_set_enabled(bool enabled);
 
 bool app_power_get_enabled(void);
 
+// Full clock, no light sleep, while held, whatever the switch says; the switch
+// itself and advertising are untouched. For OTA: under DFS + WiFi the UART drops
+// chunks.
+esp_err_t app_power_hold_full_speed(bool hold);
+
 #endif // APP_POWER_H

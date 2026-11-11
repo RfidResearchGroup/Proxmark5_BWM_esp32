@@ -73,7 +73,8 @@ CONFIG_PM_RTOS_IDLE_OPT=n
 # --- Internal RAM ---------------------------------------------------------------
 # Heap is what WiFi RX buffers come from: run it low and inbound frames are
 # dropped while the STA still reports connected (issue #10).
-# Flash driver from ROM, ~10 KB of IRAM back. GD chip support stays on.
+# Flash driver from ROM, ~10 KB of IRAM back. Drops flash auto-suspend (needs the
+# IDF driver); GD chip support stays on.
 CONFIG_SPI_FLASH_ROM_IMPL=y
 # Ring buffer code in flash (IDF 5.x; 6.x default), ISR parts stay in IRAM.
 CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y
