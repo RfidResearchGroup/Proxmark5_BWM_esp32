@@ -7,6 +7,9 @@
 #include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_efuse.h"
 #include "esp_app_desc.h"
 #include "nvs_flash.h"
 #include "app_cmd_uart.h"
@@ -776,6 +779,27 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 uint8_t present;
                 uint32_t value;
             } resp = { present ? 1 : 0, value };
+            app_uart_send_response(cmd, (uint8_t *)&resp, sizeof(resp));
+            break;
+        }
+
+        case APP_CMD_GET_SYS_CHIP_INFO: {
+            esp_chip_info_t ci;
+            esp_chip_info(&ci);
+            uint32_t flash_id = 0, flash_size = 0;
+            (void)esp_flash_read_id(NULL, &flash_id);
+            (void)esp_flash_get_physical_size(NULL, &flash_size);
+            struct __attribute__((packed)) {
+                uint8_t model;
+                uint8_t pkg;
+                uint16_t revision;
+                uint32_t features;
+                uint32_t flash_id;
+                uint32_t flash_size;
+            } resp = {
+                (uint8_t)ci.model, (uint8_t)esp_efuse_get_pkg_ver(), ci.revision,
+                ci.features, flash_id, flash_size
+            };
             app_uart_send_response(cmd, (uint8_t *)&resp, sizeof(resp));
             break;
         }

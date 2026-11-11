@@ -44,6 +44,7 @@ typedef enum {
     APP_CMD_GET_SYS_POWER_SAVE                        ,    // Get power-save mode; response uint8_t 0=off 1=on
     APP_CMD_SET_SYS_HOST_VALUE                        ,    // Persist a host (PM5) setting: payload id(uint8) + value(uint32 LE); response = the stored uint32. The module only stores it.
     APP_CMD_GET_SYS_HOST_VALUE                        ,    // Read a host setting: payload id(uint8); response present(uint8) + value(uint32 LE), present 0 = never set
+    APP_CMD_GET_SYS_CHIP_INFO                         ,    // Chip/flash identity: model(u8) pkg(u8) revision(u16, MXX) features(u32) flash_id(u32 JEDEC) flash_size(u32)
 
     // --- NOTE: OTA and reboot commands are critical for firmware download during development;
     //  do NOT change their codes (order). Add new OTA-related commands after these entries

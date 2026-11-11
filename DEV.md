@@ -979,6 +979,15 @@ A setting of the host (PM5) that has no storage of its own. The module keeps it 
 
 > **Source**: `main/main.c`
 
+#### 1023 - APP_CMD_GET_SYS_CHIP_INFO - Chip and Flash Identity
+
+| Direction | Format |
+|------|------|
+| Send | (no payload) |
+| Response | Payload (16 bytes, LE) = `uint8_t` model (`esp_chip_model_t`, 12 = ESP32-C2) + `uint8_t` package (eFuse pkg_ver) + `uint16_t` revision (MXX, 102 = v1.2) + `uint32_t` features (`CHIP_FEATURE_*`) + `uint32_t` flash JEDEC id (manufacturer << 16 \| type << 8 \| capacity) + `uint32_t` physical flash size |
+
+> **Source**: `main/main.c`
+
 ### 9.3 OTA and Reboot Commands (1800~)
 
 #### 1800 - APP_CMD_OTA_BEGIN - Start OTA
