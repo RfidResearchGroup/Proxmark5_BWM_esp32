@@ -1,6 +1,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "driver/uart.h"
+#include "hal/uart_ll.h"   // UART_INTR_FRAM_ERR
 #include "app_cmd_uart.h"
 #if CONFIG_PM_ENABLE && CONFIG_FREERTOS_USE_TICKLESS_IDLE
 #include "driver/uart_wakeup.h"
@@ -111,6 +112,8 @@ static inline void link_preamble_scan(uint8_t byte) { (void)byte; }
 
 // RX error counters since boot, see app_uart_get_rx_errors()
 static volatile uint32_t s_rx_err[APP_UART_RX_ERR_COUNT];
+
+static void baud_garbage(void);
 
 void app_uart_get_rx_errors(uint32_t out[APP_UART_RX_ERR_COUNT]) {
     for (int i = 0; i < APP_UART_RX_ERR_COUNT; i++) {
@@ -326,6 +329,7 @@ static void uart_rx_parser(uint8_t *data, size_t size) {
                 } else {
                     s_rx_err[APP_UART_RX_ERR_CRC]++;
                     ESP_LOGW(TAG, "CRC mismatch: Calc=0x%04X, Recv=0x%04X", ctx->crc_calc, ctx->crc_recv);
+                    baud_garbage();
                 }
                 ctx->state = STATE_IDLE;
                 break;
@@ -347,6 +351,29 @@ static inline void reset_uart_rx_state(void) {
     if (s_spp_common_uart_queue != NULL) xQueueReset(s_spp_common_uart_queue);
     s_ctx.state = STATE_IDLE;
     s_ticks_wait_event = portMAX_DELAY;
+}
+
+// Host gone to a slower rate (see UART_FALLBACK_BAUD): follow it after a burst of garbage.
+static void baud_garbage(void) {
+    static TickType_t t0 = 0;
+    static uint8_t n = 0;
+    if (s_uart_baud_rate <= UART_FALLBACK_BAUD) {
+        return;
+    }
+    TickType_t now = xTaskGetTickCount();
+    if ((now - t0) > pdMS_TO_TICKS(UART_GARBAGE_WINDOW_MS)) {
+        t0 = now;
+        n = 0;
+    }
+    if (++n < UART_GARBAGE_MAX) {
+        return;
+    }
+    n = 0;
+    if (uart_set_baudrate(UART_SPP_NUM, UART_FALLBACK_BAUD) == ESP_OK) {
+        ESP_LOGW(TAG, "garbage at %lu baud, back to %d", (unsigned long)s_uart_baud_rate, UART_FALLBACK_BAUD);
+        s_uart_baud_rate = UART_FALLBACK_BAUD;
+        reset_uart_rx_state();
+    }
 }
 
 /**
@@ -419,6 +446,10 @@ static void uart_rx_task(void *pvParameters) {
                     s_rx_err[APP_UART_RX_ERR_RING_FULL]++;
                     reset_on_error("UART Overflow or Buffer Full");
                     break;
+                case UART_FRAME_ERR:
+                case UART_BREAK:
+                    baud_garbage();
+                    break;
 #if SOC_UART_SUPPORT_WAKEUP_INT
                 case UART_WAKEUP:
                     // RX edges ended light sleep; the bytes that did it are gone
@@ -481,6 +512,11 @@ esp_err_t app_uart_init(void)
     // Drain the 128-byte RX FIFO at half full: the default (120) leaves ~90 us at
     // 921600 baud before an overflow, which flushes every queued frame.
     err = uart_set_rx_full_threshold(UART_SPP_NUM, UART_RX_FULL_THRESH);
+    if (err != ESP_OK) {
+        return err;
+    }
+    // frame errors feed baud_garbage() (not in the driver's default mask)
+    err = uart_enable_intr_mask(UART_SPP_NUM, UART_INTR_FRAM_ERR);
     if (err != ESP_OK) {
         return err;
     }

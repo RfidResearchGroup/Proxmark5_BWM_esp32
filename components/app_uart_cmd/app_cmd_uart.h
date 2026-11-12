@@ -16,6 +16,12 @@
 // on when acks stall past its 50 ms timeout, so only a radio stall longer than
 // that on a full window can overflow the ring. Change one, change the other.
 #define UART_RX_FULL_THRESH    64       // RX FIFO interrupt level (of 128 bytes)
+// Above this baud, a burst of garbage (frame errors, breaks, bad CRCs) means the host
+// talks at another rate - typically the PM5 bootrom, which only knows 921600/460800 -
+// so drop back to it on our own.
+#define UART_FALLBACK_BAUD     921600
+#define UART_GARBAGE_MAX       3        // garbage events ...
+#define UART_GARBAGE_WINDOW_MS 200      // ... within this window
 #define UART_RX_BUF_SIZE       12288    // Absorb device->host bursts so BLE can drain them before the UART overflows
 // The rx task reads the ring in pieces of this size into a static buffer; a heap
 // allocation sized by whatever is buffered can fail on the heap BLE leaves free.
