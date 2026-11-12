@@ -652,6 +652,8 @@ Module ──► TYPE_SLAVE_RESP (5000) ──► Host (frame taken out of the U
 
 > **Important**: `APP_CMD_SEND_FORWARD_DATA` does not specify a target. The data is sent to **all currently active passthrough channels**. To disable or isolate a channel, control it through WiFi mode or BLE start/stop commands.
 
+**Per-host forwarding.** A host that serves BLE and WiFi clients side by side sends `APP_CMD_SET_FORWARD_TAGGED` (5002) = 1 once. From then on inbound data arrives as `APP_BROADCAST_DATA_FORWARD_FROM` (8093) with its endpoint (0 = BLE, 1 = WiFi), and the host answers with `APP_CMD_SEND_FORWARD_DATA_TO` (5001) to that endpoint only. The module clears the setting on reboot and when the host queries or sets the UART baud (its link init), so a host that never asks keeps the untagged behaviour.
+
 ### 7.4 Passthrough Receive
 
 ```
@@ -985,6 +987,17 @@ A setting of the host (PM5) that has no storage of its own. The module keeps it 
 |------|------|
 | Send | (no payload) |
 | Response | Payload (16 bytes, LE) = `uint8_t` model (`esp_chip_model_t`, 12 = ESP32-C2) + `uint8_t` package (eFuse pkg_ver) + `uint16_t` revision (MXX, 102 = v1.2) + `uint32_t` features (`CHIP_FEATURE_*`) + `uint32_t` flash JEDEC id (manufacturer << 16 \| type << 8 \| capacity) + `uint32_t` physical flash size |
+
+> **Source**: `main/main.c`
+
+#### 1024 - APP_CMD_GET_SYS_RUNTIME_STATS - Uptime, Reset Reason, Task Stacks
+
+| Direction | Format |
+|------|------|
+| Send | (no payload) |
+| Response | `uint32_t` uptime s + `uint8_t` reset reason (`esp_reset_reason_t`) + 4 x `uint16_t` command UART RX errors since boot (FIFO overflow, ring full, CRC, frame timeout; all but CRC flush the RX ring) + `uint8_t` count + count x {`uint8_t` name length, name, `uint16_t` stack never used (bytes)} |
+
+Tasks are looked up by name from a fixed list; tasks that do not exist are left out. On the ESP32-C2 a software restart reads as `ESP_RST_WDT`, so use the uptime to spot a restart.
 
 > **Source**: `main/main.c`
 
@@ -1368,6 +1381,26 @@ Persisted in NVS (`app_wifi/wifi_ps`). Applied at once when WiFi is running, and
 The response is sent as soon as the frame has been parsed out of the UART ring, before the data goes out over BLE/WiFi: it is a flow-control credit for the host, not a delivery receipt. The data is then sent to BLE and, if WiFi Forward mode is active, to WiFi; a frame no channel accepts is logged and dropped (no `CMD_ERROR`).
 
 > **Source**: `main/main.c:1551-1560`
+
+#### 5001 - APP_CMD_SEND_FORWARD_DATA_TO - Send Passthrough Data to One Endpoint
+
+| Direction | Format |
+|------|------|
+| Send | Payload = `uint8_t` endpoint (0 = BLE, 1 = WiFi) + data |
+| Response | (empty payload) |
+
+Acked like 5000, before the data goes out, but sent only to that endpoint. An unknown endpoint is answered with `CMD_ERROR` instead of the ack.
+
+#### 5002 - APP_CMD_SET_FORWARD_TAGGED - Per-Host Forwarding
+
+| Direction | Format |
+|------|------|
+| Send | Payload = `uint8_t` 0 = off, 1 = on |
+| Response | Payload = `uint8_t` applied state |
+
+With it on, inbound data is broadcast as 8093 with its endpoint instead of 8089. Cleared on reboot and by `APP_CMD_GET/SET_SYS_UART_CMD_BAUD_RATE`.
+
+> **Source**: `main/main.c`
 
 ### 9.6 TCP Server Commands (2200~)
 
@@ -1932,7 +1965,7 @@ Send: APP_CMD_SET_TO_WIFI_FORWARD_MODE (2001) + 0x04 (MQTT Client)
 
 | Range | Category | Command Count |
 |--------|------|--------|
-| 1000~1022 | System and general | 23 |
+| 1000~1024 | System and general | 25 |
 | 1800~1803 | OTA and reboot | 4 |
 | 2000~2053 | WiFi mode/configuration/connection | 54 |
 | 2200~2214 | TCP Server | 15 |
@@ -1941,8 +1974,8 @@ Send: APP_CMD_SET_TO_WIFI_FORWARD_MODE (2001) + 0x04 (MQTT Client)
 | 2500~2512 | UDP Client | 13 |
 | 2600~2655 | MQTT Client | 56 |
 | 4000~4024 | BLE | 25 |
-| 5000 | Passthrough | 1 |
-| **Total** | | **219** |
+| 5000~5002 | Passthrough | 3 |
+| **Total** | | **223** |
 
 ## Appendix B: Broadcast Type Quick Reference
 
@@ -1953,6 +1986,7 @@ Send: APP_CMD_SET_TO_WIFI_FORWARD_MODE (2001) + 0x04 (MQTT Client)
 | 8090 | `SYS_LOG_MESSAGE` | Module -> host | System log (requires forwarding enabled) |
 | 8091 | `CMD_ERROR` | Module -> host | Command execution failure |
 | 8092 | `LINK_STATE` | Module -> host | BLE / WiFi client connected or gone (on change only) |
+| 8093 | `DATA_FORWARD_FROM` | Module -> host | Incoming passthrough data with its endpoint (per-host forwarding on) |
 
 ## Appendix C: Error Code Reference
 

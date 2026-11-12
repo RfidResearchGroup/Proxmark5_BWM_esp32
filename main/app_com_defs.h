@@ -9,6 +9,7 @@ typedef enum {
     APP_BROADCAST_SYS_LOG_MESSAGE               = 8090,    // System log message; all ESP_LOGx output is also forwarded here
     APP_BROADCAST_CMD_ERROR                     = 8091,    // Command execution failure report; payload is cmd(uint16) + err(int32)
     APP_BROADCAST_LINK_STATE                    = 8092,    // Wireless client link state; payload ble(uint8) + wifi(uint8), 1 = a client is connected. Sent on every change.
+    APP_BROADCAST_DATA_FORWARD_FROM             = 8093,    // Transparent-forward data with its source, sent instead of DATA_FORWARD once the host enabled APP_CMD_SET_FORWARD_TAGGED; payload ep(uint8, 0 = BLE, 1 = WiFi) + data
 } app_broadcast_type_t;
 
 
@@ -45,6 +46,7 @@ typedef enum {
     APP_CMD_SET_SYS_HOST_VALUE                        ,    // Persist a host (PM5) setting: payload id(uint8) + value(uint32 LE); response = the stored uint32. The module only stores it.
     APP_CMD_GET_SYS_HOST_VALUE                        ,    // Read a host setting: payload id(uint8); response present(uint8) + value(uint32 LE), present 0 = never set
     APP_CMD_GET_SYS_CHIP_INFO                         ,    // Chip/flash identity: model(u8) pkg(u8) revision(u16, MXX) features(u32) flash_id(u32 JEDEC) flash_size(u32)
+    APP_CMD_GET_SYS_RUNTIME_STATS                     ,    // Uptime(u32 s) reset_reason(u8, esp_reset_reason_t) uart rx errors(4 x u16: fifo ovf, ring full, crc, timeout) count(u8) + count x {name_len(u8) name stack_free(u16 bytes)}
 
     // --- NOTE: OTA and reboot commands are critical for firmware download during development;
     //  do NOT change their codes (order). Add new OTA-related commands after these entries
@@ -286,6 +288,8 @@ typedef enum {
      * Other general commands; codes start at 5000.
      */
     APP_CMD_SEND_FORWARD_DATA                   = 5000,    // Send forward data; destination (BLE or WiFi) depends on current forward mode config
+    APP_CMD_SEND_FORWARD_DATA_TO                      ,    // Send forward data to one endpoint; payload ep(uint8, 0 = BLE, 1 = WiFi) + data; acked like SEND_FORWARD_DATA
+    APP_CMD_SET_FORWARD_TAGGED                        ,    // Tag inbound forward data with its endpoint (APP_BROADCAST_DATA_FORWARD_FROM); payload uint8 0/1, response = applied. Cleared by a UART baud query/set (host link re-init) and on reboot
 
 } app_command_code_t;
 

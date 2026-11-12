@@ -195,9 +195,28 @@ static void on_wifi_scan_result_report(wifi_scan_result_t *result, uint8_t count
  * @param data Pointer to data buffer; do not free
  * @param length Data length
  */
+// Forward endpoints (APP_CMD_SEND_FORWARD_DATA_TO / APP_BROADCAST_DATA_FORWARD_FROM)
+#define FWD_EP_BLE      0
+#define FWD_EP_WIFI     1
+#define FWD_TO_BLE      (1 << FWD_EP_BLE)
+#define FWD_TO_WIFI     (1 << FWD_EP_WIFI)
+// Set by the host (APP_CMD_SET_FORWARD_TAGGED); read in the BLE and network tasks
+static volatile bool s_fwd_tagged = false;
+
+static void forward_to_host(uint8_t ep, uint8_t *data, uint16_t length) {
+    if (s_fwd_tagged) {
+        app_uart_send_broadcast_tagged(APP_BROADCAST_DATA_FORWARD_FROM, ep, (const uint8_t *)data, length);
+    } else {
+        app_uart_send_broadcast(APP_BROADCAST_DATA_FORWARD, (const uint8_t *)data, length); // Return value can be ignored
+    }
+}
+
 static void on_forward_data_received(uint8_t *data, uint16_t length) {
-    // Forward received data to UART regardless of whether the source is BLE or WiFi
-    app_uart_send_broadcast(APP_BROADCAST_DATA_FORWARD, (const uint8_t *)data, length); // Return value can be ignored
+    forward_to_host(FWD_EP_WIFI, data, length);
+}
+
+static void on_ble_forward_data_received(uint8_t *data, uint16_t length) {
+    forward_to_host(FWD_EP_BLE, data, length);
 }
 
 // Wireless client link state, pushed to the host as APP_BROADCAST_LINK_STATE on
@@ -377,15 +396,19 @@ static esp_err_t wifi_connect_deinit_additional(void) {
  * @param data Pointer to data buffer; must not be freed
  * @param length Data length
  */
-static esp_err_t tx_data_forward_from_uart(uint8_t *data, uint16_t length) {
+static esp_err_t tx_data_forward_from_uart(uint8_t to, uint8_t *data, uint16_t length) {
 
-    // Always forward to the BLE pass-through endpoint; BLE is enabled by default
+    // Forward to the BLE pass-through endpoint; BLE is enabled by default
     // unless the module has not yet completed initialization
-    esp_err_t err_ble_send = app_ble_send(data, length);
+    esp_err_t err_ble_send = ESP_FAIL;
+    if (to & FWD_TO_BLE) {
+        err_ble_send = app_ble_send(data, length);
+    }
 
-    // If WiFi forwarding mode is active, also forward to the WiFi endpoint
-    esp_err_t err_net_send = ESP_OK;
-    if (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD) {
+    // If WiFi forwarding mode is active, also forward to the WiFi endpoint.
+    // Untagged (both endpoints) a missing WiFi forward does not count as a failure.
+    esp_err_t err_net_send = (to == (FWD_TO_BLE | FWD_TO_WIFI)) ? ESP_OK : ESP_FAIL;
+    if ((to & FWD_TO_WIFI) && (g_wifi_function_mode == WIFI_FUNCTION_MODE_WIFI_FORWARD)) {
         // Call the send function for the appropriate application-layer protocol stack
         switch (wifi_forward_type) {
             case WIFI_FORWARD_TCP_SERVER:
@@ -657,6 +680,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         }
 
         case APP_CMD_GET_SYS_UART_CMD_BAUD_RATE: {
+            s_fwd_tagged = false;   // host (re)inits the link: it asks again if it wants tagging
             uint32_t baud_rate = app_uart_get_baud_rate();
             app_uart_send_response(cmd, (uint8_t *)&baud_rate, sizeof(baud_rate));
             break;
@@ -669,6 +693,7 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
         }
 
         case APP_CMD_SET_SYS_UART_CMD_BAUD_RATE: {
+            s_fwd_tagged = false;   // host (re)inits the link: it asks again if it wants tagging
             if (length != sizeof(uint32_t)) {
                 uart_cmd_error_report(cmd, ESP_ERR_INVALID_SIZE);
                 break;
@@ -828,6 +853,47 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
                 ci.features, flash_id, flash_size
             };
             app_uart_send_response(cmd, (uint8_t *)&resp, sizeof(resp));
+            break;
+        }
+
+        case APP_CMD_GET_SYS_RUNTIME_STATS: {
+            // Tasks are looked up by name (no trace facility); absent ones are skipped
+            static const char *const tasks[] = {
+                "main", "IDLE", "IDLE0", "Tmr Svc", "esp_timer", "sys_evt", "tiT", "wifi",
+                "nimble_host", "ble_ll", "bt_ll", "btController", "mdns", "mqtt_task", "uTask",
+                "tcp_server", "tcp_client", "udp_server", "udp_client", "wifiConnTask", "wifiScanTask",
+            };
+            uint8_t resp[6 + 2 * APP_UART_RX_ERR_COUNT + sizeof(tasks) / sizeof(tasks[0]) * (1 + 16 + 2)];
+            uint32_t up = (uint32_t)(esp_timer_get_time() / 1000000);
+            size_t n = 0;
+            memcpy(&resp[n], &up, sizeof(up));
+            n += sizeof(up);
+            resp[n++] = (uint8_t)esp_reset_reason();
+            uint32_t rx_err[APP_UART_RX_ERR_COUNT];
+            app_uart_get_rx_errors(rx_err);
+            for (int e = 0; e < APP_UART_RX_ERR_COUNT; e++) {
+                uint16_t v = (rx_err[e] > 0xFFFF) ? 0xFFFF : (uint16_t)rx_err[e];
+                memcpy(&resp[n], &v, sizeof(v));
+                n += sizeof(v);
+            }
+            size_t cnt_at = n++;
+            uint8_t cnt = 0;
+            for (size_t i = 0; i < sizeof(tasks) / sizeof(tasks[0]); i++) {
+                TaskHandle_t h = xTaskGetHandle(tasks[i]);
+                if (h == NULL) {
+                    continue;
+                }
+                uint8_t len = (uint8_t)strlen(tasks[i]);
+                uint16_t free_b = (uint16_t)uxTaskGetStackHighWaterMark(h);   // bytes in ESP-IDF
+                resp[n++] = len;
+                memcpy(&resp[n], tasks[i], len);
+                n += len;
+                memcpy(&resp[n], &free_b, sizeof(free_b));
+                n += sizeof(free_b);
+                cnt++;
+            }
+            resp[cnt_at] = cnt;
+            app_uart_send_response(cmd, resp, (uint16_t)n);
             break;
         }
 
@@ -1857,10 +1923,36 @@ static void on_uart_cmd_complete(PacketType_t type, uint16_t cmd, uint8_t *p_dat
             // radio would add the whole radio pipeline to the host's window and
             // throttle it to ~85 % of the UART rate; a delivery failure is logged.
             app_uart_send_response(cmd, NULL, 0);
-            esp_err_t err = tx_data_forward_from_uart(p_data, length);
+            esp_err_t err = tx_data_forward_from_uart(FWD_TO_BLE | FWD_TO_WIFI, p_data, length);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "forward data (%u B) not delivered: %s", (unsigned)length, esp_err_to_name(err));
             }
+            break;
+        }
+
+        case APP_CMD_SEND_FORWARD_DATA_TO: {
+            if ((length < 1) || (p_data[0] > FWD_EP_WIFI)) {
+                // the host's flow control takes this as the frame's answer
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            // Ack first, as for APP_CMD_SEND_FORWARD_DATA
+            app_uart_send_response(cmd, NULL, 0);
+            esp_err_t err = tx_data_forward_from_uart((uint8_t)(1 << p_data[0]), p_data + 1, length - 1);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "forward data (%u B) to ep %u not delivered: %s", (unsigned)(length - 1), p_data[0], esp_err_to_name(err));
+            }
+            break;
+        }
+
+        case APP_CMD_SET_FORWARD_TAGGED: {
+            if (length != 1) {
+                uart_cmd_error_report(cmd, ESP_ERR_INVALID_ARG);
+                break;
+            }
+            s_fwd_tagged = (p_data[0] != 0);
+            uint8_t applied = s_fwd_tagged ? 1 : 0;
+            app_uart_send_response(cmd, &applied, sizeof(applied));
             break;
         }
 
@@ -3906,7 +3998,7 @@ void app_main(void) {
     // Always initialize the BLE forwarding module so its settings can be read and
     // written; start it only if the persisted BLE switch says so.
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_init());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_set_rx_callback(on_forward_data_received));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_set_rx_callback(on_ble_forward_data_received));
     ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_set_link_callback(on_ble_link));
     if (ble_enable) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(app_ble_start()); // Final BLE module start

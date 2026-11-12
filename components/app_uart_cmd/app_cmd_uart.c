@@ -109,6 +109,15 @@ static inline void link_preamble_scan(uint8_t byte) { (void)byte; }
 #endif
 
 
+// RX error counters since boot, see app_uart_get_rx_errors()
+static volatile uint32_t s_rx_err[APP_UART_RX_ERR_COUNT];
+
+void app_uart_get_rx_errors(uint32_t out[APP_UART_RX_ERR_COUNT]) {
+    for (int i = 0; i < APP_UART_RX_ERR_COUNT; i++) {
+        out[i] = s_rx_err[i];
+    }
+}
+
 /**
  * @brief Calculate CRC16_CCITT
  */
@@ -132,18 +141,22 @@ static uint16_t crc16_ccitt(const uint8_t *data, size_t len, uint16_t init_crc) 
  * @param hdr1 Packet header byte 1
  * @param hdr2 Packet header byte 2
  * @param cmd Instruction/type code
+ * @param pre Bytes placed before the payload (may be NULL)
+ * @param pre_len Length of pre
  * @param data Payload
  * @param len Payload length
  * @return ESP_OK or ESP_FAIL
  */
-static esp_err_t uart_build_and_send(uint8_t hdr1, uint8_t hdr2, uint16_t cmd, const uint8_t *data, uint16_t len) {
-    if (len > MAX_PAYLOAD_LEN) {
-        ESP_LOGE(TAG, "Payload too large: %d", len);
+static esp_err_t uart_build_and_send_pre(uint8_t hdr1, uint8_t hdr2, uint16_t cmd, const uint8_t *pre, uint16_t pre_len,
+                                         const uint8_t *data, uint16_t len) {
+    if ((uint32_t)pre_len + len > MAX_PAYLOAD_LEN) {
+        ESP_LOGE(TAG, "Payload too large: %d", pre_len + len);
         return ESP_ERR_INVALID_ARG;
     }
+    uint16_t plen = pre_len + len;
 
     // Calculate total length: Header(2) + Cmd(2) + Len(2) + Payload(N) + CRC(2)
-    size_t total_len = 2 + 2 + 2 + len + 2;
+    size_t total_len = 2 + 2 + 2 + plen + 2;
 
     // Adaptive buffer storage area
     bool use_heap = (total_len > 256);
@@ -170,10 +183,14 @@ static esp_err_t uart_build_and_send(uint8_t hdr1, uint8_t hdr2, uint16_t cmd, c
     pkt_buf[idx++] = (cmd >> 8) & 0xFF;
     
     // 3. Length (Little-Endian)
-    pkt_buf[idx++] = len & 0xFF;
-    pkt_buf[idx++] = (len >> 8) & 0xFF;
+    pkt_buf[idx++] = plen & 0xFF;
+    pkt_buf[idx++] = (plen >> 8) & 0xFF;
     
     // 4. Payload
+    if (pre_len > 0 && pre != NULL) {
+        memcpy(&pkt_buf[idx], pre, pre_len);
+        idx += pre_len;
+    }
     if (len > 0 && data != NULL) {
         memcpy(&pkt_buf[idx], data, len);
         idx += len;
@@ -307,6 +324,7 @@ static void uart_rx_parser(uint8_t *data, size_t size) {
                         s_uart_command_callback(ctx->pkt_type, ctx->cmd_val, ctx->payload_buf, ctx->len_val);
                     }
                 } else {
+                    s_rx_err[APP_UART_RX_ERR_CRC]++;
                     ESP_LOGW(TAG, "CRC mismatch: Calc=0x%04X, Recv=0x%04X", ctx->crc_calc, ctx->crc_recv);
                 }
                 ctx->state = STATE_IDLE;
@@ -394,7 +412,11 @@ static void uart_rx_task(void *pvParameters) {
                     break;
                 }
                 case UART_FIFO_OVF:
+                    s_rx_err[APP_UART_RX_ERR_FIFO_OVF]++;
+                    reset_on_error("UART Overflow or Buffer Full");
+                    break;
                 case UART_BUFFER_FULL:
+                    s_rx_err[APP_UART_RX_ERR_RING_FULL]++;
                     reset_on_error("UART Overflow or Buffer Full");
                     break;
 #if SOC_UART_SUPPORT_WAKEUP_INT
@@ -410,6 +432,7 @@ static void uart_rx_task(void *pvParameters) {
         } else {
             // Receive event timeout, consider current packet incomplete, reset state machine
             if (s_ctx.state != STATE_IDLE) {
+                s_rx_err[APP_UART_RX_ERR_TIMEOUT]++;
                 reset_on_error("UART RX Timeout - Incomplete packet");
             }
         }
@@ -452,6 +475,12 @@ esp_err_t app_uart_init(void)
     }
     // Set UART pins
     err = uart_set_pin(UART_SPP_NUM, UART_TXD_PIN, UART_RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) {
+        return err;
+    }
+    // Drain the 128-byte RX FIFO at half full: the default (120) leaves ~90 us at
+    // 921600 baud before an overflow, which flushes every queued frame.
+    err = uart_set_rx_full_threshold(UART_SPP_NUM, UART_RX_FULL_THRESH);
     if (err != ESP_OK) {
         return err;
     }
@@ -585,6 +614,10 @@ esp_err_t app_uart_set_baud_rate(uint32_t baud_rate) {
     return ESP_OK;
 }
 
+static esp_err_t uart_build_and_send(uint8_t hdr1, uint8_t hdr2, uint16_t cmd, const uint8_t *data, uint16_t len) {
+    return uart_build_and_send_pre(hdr1, hdr2, cmd, NULL, 0, data, len);
+}
+
 /**
  * @brief Send response data packet, this is thread-safe interface
  * 
@@ -607,6 +640,20 @@ esp_err_t app_uart_send_response(uint16_t cmd, const uint8_t *data, uint16_t len
  */
 esp_err_t app_uart_send_broadcast(uint16_t type, const uint8_t *data, uint16_t len) {
     return uart_build_and_send(HDR_SLAVE_BCAST_1, HDR_SLAVE_BCAST_2, type, data, len);
+}
+
+esp_err_t app_uart_send_broadcast_tagged(uint16_t type, uint8_t tag, const uint8_t *data, uint16_t len) {
+    // split so tag + data fits one frame
+    do {
+        uint16_t n = (len > MAX_PAYLOAD_LEN - 1) ? (uint16_t)(MAX_PAYLOAD_LEN - 1) : len;
+        esp_err_t err = uart_build_and_send_pre(HDR_SLAVE_BCAST_1, HDR_SLAVE_BCAST_2, type, &tag, 1, data, n);
+        if (err != ESP_OK) {
+            return err;
+        }
+        data += n;
+        len -= n;
+    } while (len);
+    return ESP_OK;
 }
 
 /**

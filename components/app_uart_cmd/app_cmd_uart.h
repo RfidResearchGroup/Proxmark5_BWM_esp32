@@ -15,6 +15,7 @@
 // (BWM_ESP_UART_RX_BUF / BWM_FC_BYTES in proxmark3 armsrc/bwm_forward.h) but sends
 // on when acks stall past its 50 ms timeout, so only a radio stall longer than
 // that on a full window can overflow the ring. Change one, change the other.
+#define UART_RX_FULL_THRESH    64       // RX FIFO interrupt level (of 128 bytes)
 #define UART_RX_BUF_SIZE       12288    // Absorb device->host bursts so BLE can drain them before the UART overflows
 // The rx task reads the ring in pieces of this size into a static buffer; a heap
 // allocation sized by whatever is buffered can fail on the heap BLE leaves free.
@@ -132,6 +133,27 @@ esp_err_t app_uart_send_response(uint16_t cmd, const uint8_t *data, uint16_t len
  * @return ESP_OK success, other fail
  */
 esp_err_t app_uart_send_broadcast(uint16_t type, const uint8_t *data, uint16_t len);
+
+/**
+ * @brief Send slave broadcast packet(s) whose payload is `tag` followed by the data;
+ * data longer than one frame allows is split, each part carrying the tag
+ * @param type Broadcast type code
+ * @param tag First payload byte of every packet
+ * @param data Payload data
+ * @param len Payload length
+ * @return ESP_OK success, other fail
+ */
+esp_err_t app_uart_send_broadcast_tagged(uint16_t type, uint8_t tag, const uint8_t *data, uint16_t len);
+
+// RX errors since boot. Each but CRC flushes the whole RX ring (every queued frame).
+enum {
+    APP_UART_RX_ERR_FIFO_OVF = 0,   // hardware FIFO overflowed
+    APP_UART_RX_ERR_RING_FULL,      // driver ring buffer full
+    APP_UART_RX_ERR_CRC,            // frame CRC mismatch (frame dropped)
+    APP_UART_RX_ERR_TIMEOUT,        // incomplete frame timed out
+    APP_UART_RX_ERR_COUNT
+};
+void app_uart_get_rx_errors(uint32_t out[APP_UART_RX_ERR_COUNT]);
 
 /**
  * @brief Wait for UART transmission to complete to ensure previously sent data is fully sent
