@@ -9,6 +9,7 @@
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
@@ -282,6 +283,9 @@ static esp_err_t app_ble_load_persisted_params(app_ble_ctx_t *ctx) {
 
 
 static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg);
+
+// Given on BLE_GAP_EVENT_NOTIFY_TX: a notification left the host, its buffer is free
+static SemaphoreHandle_t s_notify_tx_sem = NULL;
 
 
 /**
@@ -825,6 +829,11 @@ static int ble_spp_server_gap_event(struct ble_gap_event *event, void *arg) {
     (void)arg;
 
     switch (event->type) {
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        if (s_notify_tx_sem != NULL) {
+            xSemaphoreGive(s_notify_tx_sem);
+        }
+        return 0;
     case BLE_GAP_EVENT_CONNECT:
         ESP_LOGI(TAG, "connection %s; status=%d", event->connect.status == 0 ? "established" : "failed", event->connect.status);
         // Check whether the connection succeeded or failed
@@ -1252,37 +1261,59 @@ esp_err_t app_ble_deinit(void) {
  * @param len Length of data to send
  * @return esp_err_t ESP_OK on success, other value on failure
  */
+// Wait for the next sent notification, at most 10 ms (~1 connection interval). A
+// fixed 10 ms sleep (one tick at 100 Hz) idled the link whenever the stack was full.
+static void notify_wait_tx(void) {
+    if (s_notify_tx_sem != NULL) {
+        (void)xSemaphoreTake(s_notify_tx_sem, pdMS_TO_TICKS(10));
+    } else {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 esp_err_t notify_at_retry(const void *buf, uint16_t len) {
     const uint16_t conn_handle = app_ble_get_active_conn_handle();
     if (conn_handle == BLE_HS_CONN_HANDLE_NONE) {
         return ESP_ERR_INVALID_STATE;
     }
-    // Retry loop: keep trying until send succeeds or retry counts exceed the threshold
-    int nomem_fail_count = 0;
-    int notify_fail_count = 0;
+    if (s_notify_tx_sem == NULL) {
+        s_notify_tx_sem = xSemaphoreCreateBinary();   // only the UART task sends
+    }
+    // Retry until sent or the budget (retry max x 10 ms, as when each retry slept
+    // 10 ms) runs out; the wait now ends early once a notification went out
+    const TickType_t nomem_budget = pdMS_TO_TICKS(10 * s_ctx->notify_nomem_retry_max);
+    const TickType_t notify_budget = pdMS_TO_TICKS(10 * s_ctx->notify_fail_retry_max);
+    TickType_t nomem_t0 = 0, notify_t0 = 0;
+    bool nomem_waiting = false, notify_waiting = false;
     while (1) {
         // Allocate an os_mbuf for the data chunk. NULL means the BLE stack is out of memory;
         // wait and retry. On success, call the underlying send API.
         struct os_mbuf *txom = ble_hs_mbuf_from_flat(buf, len);
         if (txom == NULL) {
-            if (++nomem_fail_count > s_ctx->notify_nomem_retry_max) {
-                ESP_LOGW(TAG, "Failed to allocate memory(ble_hs_mbuf_from_flat) for BLE notification after %d retries, data will be dropped", nomem_fail_count);
+            if (nomem_waiting == false) {
+                nomem_waiting = true;
+                nomem_t0 = xTaskGetTickCount();
+            } else if ((xTaskGetTickCount() - nomem_t0) > nomem_budget) {
+                ESP_LOGW(TAG, "Failed to allocate memory(ble_hs_mbuf_from_flat) for BLE notification within %d ms, data will be dropped", 10 * (int)s_ctx->notify_nomem_retry_max);
                 return ESP_ERR_NO_MEM;
             }
-            vTaskDelay(pdMS_TO_TICKS(10));  // ~1 connection interval; long enough for a TX buffer to free, short enough not to overflow the UART (was 100ms)
+            notify_wait_tx();
             continue;
         }
-        // os_mbuf allocated successfully; reset nomem counter
-        nomem_fail_count = 0;
+        // os_mbuf allocated successfully; reset nomem wait
+        nomem_waiting = false;
         // Call the underlying send API. BLE_HS_ENOMEM means the stack is still out of memory;
         // wait and retry. Any other error is a hard failure.
         int rc = ble_gatts_notify_custom(conn_handle, s_ctx->spp_chr_val_handle, txom);
         if (rc == BLE_HS_ENOMEM) {
-            if (++notify_fail_count > s_ctx->notify_fail_retry_max) {
-                ESP_LOGW(TAG, "Failed to send BLE notification due to insufficient memory after %d retries, data will be dropped", notify_fail_count);
+            if (notify_waiting == false) {
+                notify_waiting = true;
+                notify_t0 = xTaskGetTickCount();
+            } else if ((xTaskGetTickCount() - notify_t0) > notify_budget) {
+                ESP_LOGW(TAG, "Failed to send BLE notification due to insufficient memory within %d ms, data will be dropped", 10 * (int)s_ctx->notify_fail_retry_max);
                 return ESP_ERR_NO_MEM;
             }
-            vTaskDelay(pdMS_TO_TICKS(10));  // ~1 connection interval; long enough for a TX buffer to free, short enough not to overflow the UART (was 100ms)
+            notify_wait_tx();
             continue;
         } else if (rc != 0) {
             return ESP_FAIL;
